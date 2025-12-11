@@ -1,0 +1,328 @@
+"""
+DemandPack Generator for Edendale Site (11_031)
+
+Generates synthetic hourly heat demand profiles for 2020 anchored to annual energy
+targets with realistic seasonal, weekday, and hourly patterns.
+"""
+
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from typing import Dict, Any
+import sys
+
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        raise ImportError("Need tomllib (Python 3.11+) or tomli package")
+
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """Load and parse TOML configuration file."""
+    with open(config_path, 'rb') as f:
+        return tomllib.load(f)
+
+
+def load_annual_anchor(config: Dict[str, Any]) -> float:
+    """
+    Load annual heat target from site file.
+    Returns annual_heat_GWh for the target site and year.
+    """
+    site_file = config['general']['site_file']
+    target_site_id = config['general']['target_site_id']
+    target_year = config['general']['target_year']
+    
+    site_id_col = config['columns']['site_id']
+    year_col = config['columns']['year']
+    annual_heat_col = config['columns']['annual_heat_gwh']
+    
+    df = pd.read_csv(site_file)
+    
+    # Filter for target site and year
+    mask = (df[site_id_col] == target_site_id) & (df[year_col] == target_year)
+    if not mask.any():
+        raise ValueError(f"No data found for site_id={target_site_id}, year={target_year}")
+    
+    annual_heat_GWh = df.loc[mask, annual_heat_col].iloc[0]
+    return float(annual_heat_GWh)
+
+
+def build_hourly_index(year: int, hours_per_year: int) -> pd.DatetimeIndex:
+    """Build hourly DateTimeIndex for the full year."""
+    start = pd.Timestamp(f'{year}-01-01 00:00:00')
+    return pd.date_range(start=start, periods=hours_per_year, freq='h')
+
+
+def load_seasonal_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) -> pd.Series:
+    """
+    Load seasonal factors and interpolate to hourly resolution.
+    
+    Treats each month as an anchor at mid-month (anchor_day), interpolates
+    to daily values, applies smoothing, then maps to hourly.
+    """
+    seasonality = config['seasonality']
+    df = pd.read_csv(seasonality['file'])
+    
+    month_col = seasonality['month_col']
+    factor_col = seasonality['factor_col']
+    anchor_day = seasonality['anchor_day']
+    smooth_days = seasonality['smooth_days']
+    wrap_year = seasonality['wrap_year']
+    
+    year = hourly_index[0].year
+    
+    # Create anchor points: one per month at mid-month
+    anchors = []
+    for _, row in df.iterrows():
+        month = int(row[month_col])
+        factor = float(row[factor_col])
+        anchor_date = pd.Timestamp(f'{year}-{month:02d}-{anchor_day:02d}')
+        anchors.append({'date': anchor_date, 'factor': factor})
+    
+    # If wrapping, add Dec→Jan continuity
+    if wrap_year:
+        # Add a point at end of year (Dec 31) with Dec's factor
+        dec_factor = df[df[month_col] == 12][factor_col].iloc[0]
+        anchors.append({'date': pd.Timestamp(f'{year}-12-31'), 'factor': float(dec_factor)})
+        # Add a point at start of next year (Jan 1) with Jan's factor
+        jan_factor = df[df[month_col] == 1][factor_col].iloc[0]
+        anchors.append({'date': pd.Timestamp(f'{year+1}-01-01'), 'factor': float(jan_factor)})
+    
+    anchors_df = pd.DataFrame(anchors).sort_values('date')
+    
+    # Create daily index for the year
+    daily_index = pd.date_range(start=f'{year}-01-01', end=f'{year}-12-31', freq='D')
+    
+    # Interpolate anchors to daily values using time-based interpolation
+    daily_factors = np.interp(
+        daily_index.astype(np.int64),
+        anchors_df['date'].astype(np.int64),
+        anchors_df['factor']
+    )
+    daily_series = pd.Series(daily_factors, index=daily_index)
+    
+    # Apply rolling smoothing
+    if smooth_days > 0:
+        # Use centered rolling window
+        daily_series = daily_series.rolling(window=smooth_days, center=True, min_periods=1).mean()
+    
+    # Map daily factors to hourly (repeat each day's factor for all 24 hours)
+    # Convert hourly_index to dates and map to daily factors
+    hourly_dates = pd.to_datetime(hourly_index.date)
+    hourly_factors = daily_series.reindex(hourly_dates, method='ffill').values
+    return pd.Series(hourly_factors, index=hourly_index, name='seasonal_factor')
+
+
+def load_weekday_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) -> pd.Series:
+    """Load weekday factors and map to hourly timestamps."""
+    weekday = config['weekday']
+    df = pd.read_csv(weekday['file'])
+    
+    day_col = weekday['day_col']
+    factor_col = weekday['factor_col']
+    
+    # Create mapping from day name to factor
+    day_to_factor = dict(zip(df[day_col], df[factor_col]))
+    
+    # Map each timestamp's day name to its factor
+    day_names = hourly_index.day_name()
+    factors = [day_to_factor.get(day, 1.0) for day in day_names]
+    
+    return pd.Series(factors, index=hourly_index, name='weekday_factor')
+
+
+def load_hourly_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) -> pd.Series:
+    """Load hour-of-day factors and map to hourly timestamps."""
+    daily = config['daily']
+    df = pd.read_csv(daily['file'])
+    
+    hour_col = daily['hour_col']
+    factor_col = daily['factor_col']
+    
+    # Create mapping from hour (0-23) to factor
+    hour_to_factor = dict(zip(df[hour_col], df[factor_col]))
+    
+    # Map each timestamp's hour to its factor
+    hours = hourly_index.hour
+    factors = [hour_to_factor.get(hour, 1.0) for hour in hours]
+    
+    return pd.Series(factors, index=hourly_index, name='hourly_factor')
+
+
+def generate_weekly_drift(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) -> pd.Series:
+    """
+    Generate weekly drift factors using AR(1) process in log-space.
+    
+    Creates one factor per ISO week, then maps to hourly timestamps.
+    """
+    weekly_drift = config['weekly_drift']
+    
+    if not weekly_drift['enabled']:
+        return pd.Series(1.0, index=hourly_index, name='weekly_factor')
+    
+    sigma = weekly_drift['sigma']
+    rho = weekly_drift['rho']
+    min_factor = weekly_drift['min']
+    max_factor = weekly_drift['max']
+    
+    # Get ISO week numbers for all hours
+    week_numbers = hourly_index.isocalendar().week
+    unique_weeks = sorted(week_numbers.unique())
+    n_weeks = len(unique_weeks)
+    
+    # Generate AR(1) process in log-space
+    np.random.seed(config['noise']['seed'])
+    log_r = np.zeros(n_weeks)
+    log_r[0] = 0.0  # Initial factor = 1.0
+    
+    for w in range(1, n_weeks):
+        eps = np.random.normal(0, sigma)
+        log_r[w] = rho * log_r[w-1] + eps
+    
+    # Convert to factors and clamp
+    r = np.exp(log_r)
+    r = np.clip(r, min_factor, max_factor)
+    
+    # Create mapping from week number to factor
+    week_to_factor = dict(zip(unique_weeks, r))
+    
+    # Map each hour to its week's factor
+    factors = [week_to_factor.get(week, 1.0) for week in week_numbers]
+    
+    return pd.Series(factors, index=hourly_index, name='weekly_factor')
+
+
+def generate_hour_noise(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) -> pd.Series:
+    """Generate hour-to-hour noise factors."""
+    noise = config['noise']
+    
+    if not noise['enabled']:
+        return pd.Series(1.0, index=hourly_index, name='noise_factor')
+    
+    hour_sigma = noise['hour_sigma']
+    seed = noise['seed']
+    
+    np.random.seed(seed)
+    eps = np.random.normal(0, hour_sigma, len(hourly_index))
+    factors = 1.0 + eps
+    
+    # Clamp to reasonable bounds
+    factors = np.clip(factors, 0.95, 1.05)
+    
+    return pd.Series(factors, index=hourly_index, name='noise_factor')
+
+
+def generate_demandpack(config_path: str) -> pd.DataFrame:
+    """
+    Main function to generate the DemandPack hourly heat demand profile.
+    
+    Returns DataFrame with timestamp, site_id, heat_demand_MW, and all factors.
+    """
+    config = load_config(config_path)
+    
+    # Load annual anchor
+    annual_heat_GWh = load_annual_anchor(config)
+    hours_per_year = config['general']['hours_per_year']
+    target_year = config['general']['target_year']
+    target_site_id = config['general']['target_site_id']
+    
+    # Compute average MW
+    avg_MW = annual_heat_GWh * 1000.0 / hours_per_year
+    
+    # Build hourly index
+    hourly_index = build_hourly_index(target_year, hours_per_year)
+    
+    # Load and compute all factors
+    seasonal = load_seasonal_factors(config, hourly_index)
+    weekday = load_weekday_factors(config, hourly_index)
+    hourly = load_hourly_factors(config, hourly_index)
+    weekly = generate_weekly_drift(config, hourly_index)
+    noise = generate_hour_noise(config, hourly_index)
+    
+    # Combine factors
+    combined_factors = seasonal * weekday * hourly * weekly * noise
+    
+    # Compute raw MW
+    raw_MW = avg_MW * combined_factors
+    
+    # Energy closure: scale to exact annual target
+    raw_GWh = raw_MW.sum() / 1000.0
+    scale = annual_heat_GWh / raw_GWh
+    final_MW = raw_MW * scale
+    
+    # Build output DataFrame
+    result = pd.DataFrame({
+        'timestamp': hourly_index,
+        'site_id': target_site_id,
+        'heat_demand_MW': final_MW,
+        'seasonal_factor': seasonal.values,
+        'weekday_factor': weekday.values,
+        'hourly_factor': hourly.values,
+        'weekly_factor': weekly.values,
+        'noise_factor': noise.values,
+    })
+    
+    # Verify energy closure
+    final_GWh = result['heat_demand_MW'].sum() / 1000.0
+    error = abs(final_GWh - annual_heat_GWh)
+    if error > 0.001:  # 1 MWh tolerance
+        print(f"WARNING: Energy closure error = {error:.6f} GWh")
+    else:
+        print(f"[OK] Energy closure verified: {final_GWh:.6f} GWh (target: {annual_heat_GWh} GWh)")
+    
+    return result
+
+
+def main():
+    """CLI entrypoint."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Generate DemandPack hourly heat demand')
+    parser.add_argument('--config', default='Input/demandpack_config.toml',
+                       help='Path to config TOML file')
+    args = parser.parse_args()
+    
+    # Ensure output directory exists
+    output_path = Path('Output')
+    output_path.mkdir(exist_ok=True)
+    
+    # Generate demandpack
+    print("Generating DemandPack...")
+    df = generate_demandpack(args.config)
+    
+    # Save CSV
+    config = load_config(args.config)
+    output_csv = config['general']['output_csv']
+    df['timestamp'] = df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    df.to_csv(output_csv, index=False)
+    print(f"[OK] Saved output to {output_csv}")
+    
+    # Print summary statistics
+    print("\nSummary Statistics:")
+    print(f"  Mean hourly load: {df['heat_demand_MW'].mean():.2f} MW")
+    print(f"  Max hourly load: {df['heat_demand_MW'].max():.2f} MW")
+    print(f"  95th percentile: {df['heat_demand_MW'].quantile(0.95):.2f} MW")
+    print(f"  Total energy: {df['heat_demand_MW'].sum() / 1000.0:.6f} GWh")
+    
+    # Monthly totals
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df['month'] = df['timestamp'].dt.month
+    monthly = df.groupby('month')['heat_demand_MW'].sum() / 1000.0
+    print("\nMonthly totals (GWh):")
+    for month, gwh in monthly.items():
+        print(f"  Month {month:2d}: {gwh:6.2f} GWh")
+    
+    # Sanity check for peak load
+    peak_MW = df['heat_demand_MW'].max()
+    if peak_MW > 200:  # Rough sanity check for 4-coal-boiler fleet
+        print(f"\n[WARNING] Peak hourly load ({peak_MW:.2f} MW) may be implausibly high")
+    else:
+        print(f"\n[OK] Peak load ({peak_MW:.2f} MW) appears reasonable")
+
+
+if __name__ == '__main__':
+    main()
+

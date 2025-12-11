@@ -28,6 +28,20 @@ For quick plotting of just the core timeseries and envelope (saved to `Output/`)
 python -m src.plot_demandpack_diagnostics
 ```
 
+## Computing 2020 Site Dispatch
+
+To compute baseline utility dispatch for 2020:
+
+```bash
+python -m src.site_dispatch_2020
+```
+
+This allocates hourly heat demand across site utilities (coal boilers) proportionally by capacity and computes fuel consumption and CO2 emissions. Outputs:
+- `Output/site_dispatch_2020_long.csv` - Long-form dispatch data
+- `Output/site_dispatch_2020_wide.csv` - Wide-form dispatch data
+
+Add `--plot` flag to generate a stacked area plot: `Output/Figures/heat_2020_unit_stack.png`
+
 ## Reproducibility
 
 All development is tracked with git commits and tags. See `docs/git_workflow.md` for version control practices and workflow guidance.

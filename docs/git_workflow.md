@@ -94,3 +94,29 @@ For quick plotting of just the core timeseries and envelope (saved to `Output/`)
 python -m src.plot_demandpack_diagnostics
 ```
 
+## Computing 2020 Site Dispatch
+
+To compute baseline utility dispatch for 2020, run from the project root:
+
+```bash
+python -m src.site_dispatch_2020
+```
+
+This will:
+- Load hourly demand from `Output/hourly_heat_demand_2020.csv`
+- Load utilities from `Input/site_utilities_2020.csv`
+- Allocate heat demand proportionally by unit capacity
+- Compute fuel consumption and CO2 emissions
+- Generate two output CSVs:
+  - `Output/site_dispatch_2020_long.csv` - Long-form with timestamp, unit_id, heat_MW, fuel_MWh, co2_tonnes
+  - `Output/site_dispatch_2020_wide.csv` - Wide-form with timestamp, total_heat_MW, and unit columns (CB1_MW, CB2_MW, etc.)
+- Print annual summary by unit (heat, fuel, CO2)
+
+To also generate a stacked area plot of unit dispatch:
+
+```bash
+python -m src.site_dispatch_2020 --plot
+```
+
+This creates `Output/Figures/heat_2020_unit_stack.png` showing unit dispatch over time with total demand overlay.
+

@@ -1,0 +1,8 @@
+day_of_week,scaling_factor
+Monday,1
+Tuesday,1
+Wednesday,1
+Thursday,1
+Friday,0.995
+Saturday,0.99
+Sunday,0.985

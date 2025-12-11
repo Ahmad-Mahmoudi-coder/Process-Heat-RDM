@@ -1,0 +1,102 @@
+[run]
+site_id = "11_031"
+year = 2020
+carrier = "heat"
+freq = "hourly"
+
+[paths]
+input_dir = "Input"
+output_dir = "Output"
+
+[inputs]
+annual_file   = "site_annual_2020.csv"
+daily_file    = "daily_factors.csv"
+seasonal_file = "seasonal_factors.csv"
+weekday_file  = "weekday_factors.csv"
+
+# -----------------------------
+# Schemas (must match CSV headers)
+# -----------------------------
+[schema.annual]
+site_id_col = "site_id"
+year_col = "year"
+annual_heat_col = "annual_heat_GWh"
+annual_elec_col = "annual_elec_GWh"
+daily_hours_col = "daily_operation_hours"
+yearly_days_col = "yearly_operation_days"
+note_col = "note"
+
+[schema.daily]
+hour_col = "hour"
+value_col = "hourly_factor"
+
+[schema.seasonal]
+month_col = "month"
+factor_col = "scaling_factor"
+season_col = "season"
+notes_col = "notes"
+
+[schema.weekday]
+dow_col = "day_of_week"
+factor_col = "scaling_factor"
+
+# -----------------------------
+# Processing controls
+# -----------------------------
+[processing]
+normalise_daily_profile = true
+enable_weekday = true
+enable_seasonal_envelope = true
+enable_temperature = false
+enable_tou = false
+
+# -----------------------------
+# Seasonality (new block)
+# -----------------------------
+[seasonality]
+method = "month_anchor_interpolation"
+anchor_day = 15
+interpolation = "time"
+rolling_smooth_days = 21
+wrap_year = true
+min_factor = 0.30
+max_factor = 1.20
+
+# -----------------------------
+# Noise (keep small and realistic)
+# -----------------------------
+[noise]
+enabled = true
+seed = 42
+day_amp = 0.002
+hour_amp = 0.001
+low_freq_mode = "ar1"
+ar1_phi = 0.95
+ar1_sigma = 0.002
+low_freq_target = "relative_demand"
+post_smooth_hours = 1
+
+# -----------------------------
+# Normalisation
+# -----------------------------
+[normalisation]
+method = "annual_sum"
+target_col = "annual_heat_GWh"
+
+# -----------------------------
+# Outputs
+# -----------------------------
+[outputs]
+hourly_file = "hourly_heat_demand_2020.csv"
+include_factors = true
+include_diagnostics = true
+factor_diagnostics_fig = "heat_2020_factor_diagnostics.png"
+timeseries_fig = "heat_2020_timeseries.png"
+hourly_means_by_season_fig = "heat_2020_hourly_means_by_season.png"
+
+# -----------------------------
+# Meta
+# -----------------------------
+[meta]
+demandpack_version = "poc-v1.1"
+notes = "Baseline 2020 DemandPack: minimal inputs, smooth seasonal envelope, low-noise PoC realism."

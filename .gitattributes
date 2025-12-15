@@ -1,4 +1,4 @@
-﻿# Default: normalise to LF in the repo
+# Default: normalise to LF in the repo
 * text=auto eol=lf
 
 # Windows scripts

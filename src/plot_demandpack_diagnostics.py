@@ -6,6 +6,8 @@ Generates publication-ready figures for the synthetic hourly heat demand profile
 
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Dict, Any
@@ -401,20 +403,20 @@ if __name__ == '__main__':
         finally:
             sys.argv = old_argv
     else:
-        # Simple mode: load data and generate two plots in Output/ (not Figures/)
+        # Simple mode: load data and generate two plots in Output/Figures/
         print(f"Loading data from {args.data}...")
         df = pd.read_csv(args.data)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
         df = df.sort_values('timestamp').reset_index(drop=True)
         
-        # Ensure Output directory exists
-        output_dir = Path('Output')
-        output_dir.mkdir(exist_ok=True)
+        # Ensure Figures directory exists
+        figures_dir = Path('Output') / 'Figures'
+        figures_dir.mkdir(parents=True, exist_ok=True)
         
-        # Generate the two requested plots in Output/
+        # Generate the two requested plots in Output/Figures/
         print("Generating plots...")
-        plot_hourly_timeseries(df, str(output_dir / "heat_2020_timeseries.png"))
-        plot_daily_envelope(df, str(output_dir / "heat_2020_daily_envelope.png"))
+        plot_hourly_timeseries(df, str(figures_dir / "heat_2020_timeseries.png"))
+        plot_daily_envelope(df, str(figures_dir / "heat_2020_daily_envelope.png"))
         
         # Print summary statistics
         print("\n" + "="*50)

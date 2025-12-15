@@ -64,13 +64,20 @@ def main():
     # Step 1: Clean outputs
     delete_outputs()
     
-    # Step 2: Generate DemandPack
+    # Step 2: Read total site capacity from utilities
+    import pandas as pd
+    util_df = pd.read_csv('Input/site_utilities_2020.csv')
+    total_capacity_MW = util_df['max_heat_MW'].sum()
+    print(f"Total site capacity: {total_capacity_MW:.2f} MW")
+    
+    # Step 3: Generate DemandPack with peak cap
     run_command(
-        ['python', '-m', 'src.generate_demandpack', '--config', 'Input/demandpack_config.toml'],
+        ['python', '-m', 'src.generate_demandpack', '--config', 'Input/demandpack_config.toml',
+         '--cap-peak-mw', str(total_capacity_MW)],
         "Step 1: Generate DemandPack hourly demand profile"
     )
     
-    # Step 3: Generate DemandPack diagnostic figures
+    # Step 4: Generate DemandPack diagnostic figures
     run_command(
         ['python', '-m', 'src.plot_demandpack_diagnostics', 
          '--full-diagnostics', 
@@ -79,13 +86,11 @@ def main():
         "Step 2: Generate DemandPack diagnostic figures"
     )
     
-    # Step 4: Run optimal subset dispatch with plots
+    # Step 5: Run optimal subset dispatch with plots (reserve penalties OFF by default)
     run_command(
         ['python', '-m', 'src.site_dispatch_2020',
          '--mode', 'optimal_subset',
          '--plot',
-         '--reserve-frac', '0.15',
-         '--reserve-penalty-nzd-per-MWh', '2000',
          '--no-load-cost-nzd-per-h', '50.0'],
         "Step 3: Compute optimal subset dispatch and generate plots"
     )

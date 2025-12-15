@@ -244,8 +244,8 @@ def allocate_dispatch_optimal_subset(
     signals: Dict[str, float],
     commitment_block_hours: int = 168,
     unserved_penalty_nzd_per_MWh: float = 50000.0,
-    reserve_frac: float = 0.15,
-    reserve_penalty_nzd_per_MWh: float = 2000.0,
+    reserve_frac: float = 0.0,
+    reserve_penalty_nzd_per_MWh: float = 0.0,
     no_load_cost_nzd_per_h: float = 50.0,
     online_cost_applies_when: str = 'online_only'
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -927,7 +927,7 @@ def aggregate_system_costs(dispatch_long: pd.DataFrame) -> dict:
     return system_costs
 
 
-def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.15) -> pd.DataFrame:
+def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.0) -> pd.DataFrame:
     """
     Compute annual totals and key indicators by unit, plus SYSTEM and TOTAL rows.
     
@@ -941,6 +941,12 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     Returns:
         DataFrame with one row per unit_id, one SYSTEM row, and one TOTAL row
     """
+    # Initialize penalty variables (always defined, even when reserve_frac=0)
+    unserved_energy_mwh = 0.0
+    unserved_penalty_cost_nzd = 0.0
+    reserve_shortfall_mwh = 0.0
+    reserve_penalty_cost_nzd = 0.0
+    total_system_penalties_nzd = 0.0
     # Aggregate by unit - EXCLUDE system penalties (they're stored once per hour, not per unit)
     # Note: total_cost_nzd in hourly data includes system penalties, so we'll recompute it
     # as sum of unit-level costs only
@@ -1050,8 +1056,23 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         if col in dispatch_long.columns:
             annual_by_unit[col] = 0.0
     
+    # Add operational/penalty cost columns to unit rows (unit-level operational costs only)
+    annual_by_unit['annual_operational_cost_nzd'] = annual_by_unit['annual_total_cost_nzd']  # Units have no penalties
+    annual_by_unit['annual_penalty_cost_nzd'] = 0.0  # Units have no penalties
+    annual_by_unit['annual_system_cost_nzd'] = 0.0  # Units have no system costs
+    annual_by_unit['avg_operational_cost_nzd_per_MWh_heat'] = annual_by_unit['avg_cost_nzd_per_MWh_heat']
+    
     # Aggregate system-level costs separately (stored once per hour, not per unit)
     system_costs = aggregate_system_costs(dispatch_long)
+    
+    # Extract penalty values from system_costs (always defined, defaults to 0.0)
+    unserved_penalty_cost_nzd = system_costs.get('unserved_cost_nzd', 0.0)
+    reserve_penalty_cost_nzd = system_costs.get('reserve_penalty_cost_nzd', 0.0)
+    unserved_energy_mwh = system_costs.get('unserved_MW', 0.0)
+    reserve_shortfall_mwh = system_costs.get('reserve_shortfall_MW', 0.0)
+    
+    # Compute total system penalties (unserved + reserve, excluding online which is operational)
+    total_system_penalties_nzd = unserved_penalty_cost_nzd + reserve_penalty_cost_nzd
     
     # Create SYSTEM row for system penalties
     system_dict = {
@@ -1066,8 +1087,12 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         'annual_co2_tonnes': 0.0,
         'annual_fuel_cost_nzd': 0.0,
         'annual_carbon_cost_nzd': 0.0,
-        'annual_total_cost_nzd': 0.0,
+        'annual_total_cost_nzd': total_system_penalties_nzd,  # SYSTEM row = penalties only
+        'annual_operational_cost_nzd': 0.0,  # SYSTEM has no operational costs
+        'annual_penalty_cost_nzd': total_system_penalties_nzd,  # Only infeasibility penalties (unserved + reserve)
+        'annual_system_cost_nzd': total_system_penalties_nzd + system_costs.get('online_cost_nzd', 0.0),  # Penalties + online
         'avg_cost_nzd_per_MWh_heat': 0.0,
+        'avg_operational_cost_nzd_per_MWh_heat': 0.0,
     }
     # Add optimal mode unit columns (set to 0 for system row)
     if 'var_om_cost_nzd' in annual_by_unit.columns:
@@ -1076,8 +1101,16 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         system_dict['fixed_on_cost_nzd'] = 0.0
     if 'startup_cost_nzd' in annual_by_unit.columns:
         system_dict['startup_cost_nzd'] = 0.0
-    # Add system penalty columns
-    system_dict.update(system_costs)
+    # Add system penalty columns (unserved and reserve only; online_cost is operational, not in SYSTEM row)
+    if 'unserved_MW' in system_costs:
+        system_dict['unserved_MW'] = system_costs['unserved_MW']
+    if 'unserved_cost_nzd' in system_costs:
+        system_dict['unserved_cost_nzd'] = system_costs['unserved_cost_nzd']
+    if 'reserve_shortfall_MW' in system_costs:
+        system_dict['reserve_shortfall_MW'] = system_costs['reserve_shortfall_MW']
+    if 'reserve_penalty_cost_nzd' in system_costs:
+        system_dict['reserve_penalty_cost_nzd'] = system_costs['reserve_penalty_cost_nzd']
+    # Note: online_cost_nzd is NOT added to SYSTEM row (it's operational, shown in TOTAL)
     # Add diagnostic metrics to system row (NaN for system row)
     if total_dict_base:
         for key in total_dict_base:
@@ -1086,18 +1119,16 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     system_row = pd.Series(system_dict, name='SYSTEM')
     
     # Compute three totals explicitly
+    # Note: total_system_penalties_nzd already computed above before SYSTEM row creation
     total_units_cost_nzd = annual_by_unit['annual_total_cost_nzd'].sum()
-    total_system_penalties_nzd = (
-        system_costs.get('unserved_cost_nzd', 0) +
-        system_costs.get('reserve_penalty_cost_nzd', 0) +
-        system_costs.get('online_cost_nzd', 0)
-    )
-    grand_total_cost_nzd = total_units_cost_nzd + total_system_penalties_nzd
+    # Note: online_cost is operational (no-load/hot-standby), not a penalty
+    total_operational_cost_nzd = total_units_cost_nzd + system_costs.get('online_cost_nzd', 0)
+    grand_total_cost_nzd = total_operational_cost_nzd + total_system_penalties_nzd
     
     # Cost closure check
-    assert abs(grand_total_cost_nzd - (total_units_cost_nzd + total_system_penalties_nzd)) < 1e-6, \
-        f"Cost closure failed: {grand_total_cost_nzd} != {total_units_cost_nzd} + {total_system_penalties_nzd}"
-    print(f"[OK] Cost closure: grand_total = units + penalties ({grand_total_cost_nzd:,.2f} = {total_units_cost_nzd:,.2f} + {total_system_penalties_nzd:,.2f})")
+    assert abs(grand_total_cost_nzd - (total_operational_cost_nzd + total_system_penalties_nzd)) < 1e-6, \
+        f"Cost closure failed: {grand_total_cost_nzd} != {total_operational_cost_nzd} + {total_system_penalties_nzd}"
+    print(f"[OK] Cost closure: grand_total = operational + penalties ({grand_total_cost_nzd:,.2f} = {total_operational_cost_nzd:,.2f} + {total_system_penalties_nzd:,.2f})")
     
     # Create TOTAL row (unit costs + system costs)
     total_dict = {
@@ -1112,11 +1143,18 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         'annual_co2_tonnes': annual_by_unit['annual_co2_tonnes'].sum(),
         'annual_fuel_cost_nzd': annual_by_unit['annual_fuel_cost_nzd'].sum(),
         'annual_carbon_cost_nzd': annual_by_unit['annual_carbon_cost_nzd'].sum(),
-        'annual_total_cost_nzd': grand_total_cost_nzd,  # Units + system penalties
+        'annual_total_cost_nzd': grand_total_cost_nzd,  # Operational + penalties
+        'annual_operational_cost_nzd': total_operational_cost_nzd,  # Units + online/no-load
+        'annual_penalty_cost_nzd': total_system_penalties_nzd,  # Unserved + reserve penalties
+        'annual_system_cost_nzd': total_system_penalties_nzd + system_costs.get('online_cost_nzd', 0.0),  # Penalties + online
         'avg_cost_nzd_per_MWh_heat': (
             grand_total_cost_nzd /
             (annual_by_unit['annual_heat_GWh'].sum() * 1000.0) if annual_by_unit['annual_heat_GWh'].sum() > 0 else 0.0
         ),  # Based on served heat (not demand)
+        'avg_operational_cost_nzd_per_MWh_heat': (
+            total_operational_cost_nzd /
+            (annual_by_unit['annual_heat_GWh'].sum() * 1000.0) if annual_by_unit['annual_heat_GWh'].sum() > 0 else 0.0
+        ),  # Operational cost per MWh served
     }
     
     # Add optimal mode unit totals
@@ -1178,7 +1216,11 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     
     output_cols.extend([
         'annual_total_cost_nzd',
+        'annual_operational_cost_nzd',
+        'annual_penalty_cost_nzd',
+        'annual_system_cost_nzd',
         'avg_cost_nzd_per_MWh_heat',
+        'avg_operational_cost_nzd_per_MWh_heat',
     ])
     
     if 'unserved_MW' in summary.columns:
@@ -1204,6 +1246,24 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     for col in diagnostic_cols:
         if col in summary.columns:
             output_cols.append(col)
+    
+    # Compute annual_penalty_cost_nzd for all rows (unserved + reserve)
+    # Use .get() with defaults to handle missing columns
+    for idx in summary.index:
+        unserved = summary.loc[idx, 'unserved_cost_nzd'] if 'unserved_cost_nzd' in summary.columns else 0.0
+        reserve = summary.loc[idx, 'reserve_penalty_cost_nzd'] if 'reserve_penalty_cost_nzd' in summary.columns else 0.0
+        summary.loc[idx, 'annual_penalty_cost_nzd'] = unserved + reserve
+    
+    # Compute annual_system_cost_nzd for SYSTEM and TOTAL rows only (penalty + online)
+    for idx in summary.index:
+        unit_id = summary.loc[idx, 'unit_id'] if 'unit_id' in summary.columns else summary.index[idx]
+        if unit_id in ['SYSTEM', 'TOTAL']:
+            penalty = summary.loc[idx, 'annual_penalty_cost_nzd']
+            online = summary.loc[idx, 'online_cost_nzd'] if 'online_cost_nzd' in summary.columns else 0.0
+            summary.loc[idx, 'annual_system_cost_nzd'] = penalty + online
+        else:
+            # Unit rows: system cost = 0
+            summary.loc[idx, 'annual_system_cost_nzd'] = 0.0
     
     # Ensure unit_id is first column
     final_cols = ['unit_id'] + [col for col in output_cols if col in summary.columns and col != 'unit_id']
@@ -1410,10 +1470,10 @@ def main():
                        help='Hours per commitment block for optimal_subset mode (default: 24 = daily)')
     parser.add_argument('--unserved-penalty-nzd-per-MWh', type=float, default=50000.0,
                        help='Penalty for unserved demand in optimal_subset mode (default: 50000)')
-    parser.add_argument('--reserve-frac', type=float, default=0.15,
-                       help='Reserve requirement fraction of demand for optimal_subset mode (default: 0.15)')
-    parser.add_argument('--reserve-penalty-nzd-per-MWh', type=float, default=2000.0,
-                       help='Penalty for reserve shortfall in optimal_subset mode (default: 2000)')
+    parser.add_argument('--reserve-frac', type=float, default=0.0,
+                       help='Reserve requirement fraction of demand for optimal_subset mode (default: 0.0)')
+    parser.add_argument('--reserve-penalty-nzd-per-MWh', type=float, default=0.0,
+                       help='Penalty for reserve shortfall in optimal_subset mode (default: 0.0)')
     parser.add_argument('--no-load-cost-nzd-per-h', type=float, default=50.0,
                        help='No-load/hot-standby cost per hour per online unit in optimal_subset mode (default: 50.0)')
     parser.add_argument('--online-cost-applies-when', choices=['online_only', 'firing_only'], default='online_only',
@@ -1504,6 +1564,24 @@ def main():
     assert 'unit_id' in annual_summary.columns, "unit_id column missing before CSV write"
     annual_summary.to_csv(summary_path, index=False)
     
+    # Self-check: verify TOTAL row cost closure
+    if args.mode == 'optimal_subset' and 'TOTAL' in annual_summary['unit_id'].values:
+        total_row = annual_summary[annual_summary['unit_id'] == 'TOTAL'].iloc[0]
+        expected_total = (
+            total_row.get('annual_fuel_cost_nzd', 0.0) +
+            total_row.get('annual_carbon_cost_nzd', 0.0) +
+            total_row.get('var_om_cost_nzd', 0.0) +
+            total_row.get('fixed_on_cost_nzd', 0.0) +
+            total_row.get('startup_cost_nzd', 0.0) +
+            total_row.get('online_cost_nzd', 0.0) +
+            total_row.get('annual_penalty_cost_nzd', 0.0)
+        )
+        actual_total = total_row.get('annual_total_cost_nzd', 0.0)
+        tolerance = 1e-3  # 0.001 NZD tolerance
+        assert abs(actual_total - expected_total) < tolerance, \
+            f"TOTAL row cost closure failed: annual_total_cost_nzd={actual_total:.2f} != sum of components={expected_total:.2f} (diff={abs(actual_total - expected_total):.2f})"
+        print(f"[OK] TOTAL row cost closure verified: {actual_total:,.2f} NZD")
+    
     # Print summary table
     print("\n" + "="*80)
     print("Annual Summary by Unit")
@@ -1541,24 +1619,28 @@ def main():
     
     if system_row is not None:
         print("\n" + "="*80)
-        print("System-Level Penalties")
+        print("System-Level Penalties (Infeasibility Only)")
         print("="*80)
-        if 'unserved_MW' in system_row and system_row['unserved_MW'] > 0:
-            print(f"  Unserved energy (MWh):       {system_row['unserved_MW']:10.2f}")
-        if 'unserved_cost_nzd' in system_row and system_row['unserved_cost_nzd'] > 0:
-            print(f"  Unserved penalty cost (NZD): {system_row['unserved_cost_nzd']:12,.2f}")
-        if 'reserve_shortfall_MW' in system_row and system_row['reserve_shortfall_MW'] > 0:
-            print(f"  Reserve shortfall (MWh):     {system_row['reserve_shortfall_MW']:10.2f}")
-        if 'reserve_penalty_cost_nzd' in system_row and system_row['reserve_penalty_cost_nzd'] > 0:
-            print(f"  Reserve penalty cost (NZD):  {system_row['reserve_penalty_cost_nzd']:12,.2f}")
-        if 'online_cost_nzd' in system_row and system_row['online_cost_nzd'] > 0:
-            print(f"  Online/no-load cost (NZD):  {system_row['online_cost_nzd']:12,.2f}")
-        system_total = (
-            system_row.get('unserved_cost_nzd', 0) +
-            system_row.get('reserve_penalty_cost_nzd', 0) +
-            system_row.get('online_cost_nzd', 0)
-        )
-        print(f"  Total system penalties (NZD): {system_total:12,.2f}")
+        # Show unserved (always show, even if 0)
+        unserved_mwh = system_row.get('unserved_MW', 0.0)
+        unserved_cost = system_row.get('unserved_cost_nzd', 0.0)
+        print(f"  Unserved energy (MWh):       {unserved_mwh:10.2f}")
+        print(f"  Unserved penalty cost (NZD): {unserved_cost:12,.2f}")
+        
+        # Show reserve (always show, even if 0)
+        reserve_shortfall_mwh = system_row.get('reserve_shortfall_MW', 0.0)
+        reserve_penalty_cost = system_row.get('reserve_penalty_cost_nzd', 0.0)
+        print(f"  Reserve shortfall (MWh):     {reserve_shortfall_mwh:10.2f}")
+        print(f"  Reserve penalty cost (NZD):  {reserve_penalty_cost:12,.2f}")
+        
+        # Total penalties (unserved + reserve only)
+        total_penalties = unserved_cost + reserve_penalty_cost
+        print(f"  Total penalty cost (NZD):    {total_penalties:12,.2f}")
+        
+        # Note: online/no-load cost is operational, not a penalty (shown in TOTAL section)
+    
+    # Get system_costs for online_cost display (needed for TOTAL section)
+    system_costs_for_display = aggregate_system_costs(dispatch_long) if args.mode == 'optimal_subset' else {}
     
     # Print TOTAL row (use column-based lookup after reset_index)
     if 'unit_id' in annual_summary.columns:
@@ -1587,14 +1669,23 @@ def main():
             print(f"  Fixed-on cost (NZD):         {total_row['fixed_on_cost_nzd']:12,.2f}")
         if 'startup_cost_nzd' in total_row:
             print(f"  Startup cost (NZD):          {total_row['startup_cost_nzd']:12,.2f}")
-        if 'unserved_cost_nzd' in total_row and total_row['unserved_cost_nzd'] > 0:
-            print(f"  Unserved penalty cost (NZD): {total_row['unserved_cost_nzd']:12,.2f}")
-        if 'reserve_penalty_cost_nzd' in total_row and total_row['reserve_penalty_cost_nzd'] > 0:
-            print(f"  Reserve penalty cost (NZD):  {total_row['reserve_penalty_cost_nzd']:12,.2f}")
-        if 'online_cost_nzd' in total_row and total_row['online_cost_nzd'] > 0:
-            print(f"  Online/no-load cost (NZD):  {total_row['online_cost_nzd']:12,.2f}")
+        
+        # Operational adders (no-load/hot-standby) - not a penalty
+        online_cost = system_costs_for_display.get('online_cost_nzd', 0.0)
+        if online_cost > 0:
+            print(f"  Online/no-load cost (NZD):  {online_cost:12,.2f}")
+        
+        print()
+        if 'annual_operational_cost_nzd' in total_row:
+            print(f"  Annual operational cost (NZD): {total_row['annual_operational_cost_nzd']:12,.2f}")
+            print(f"    (includes: fuel + carbon + var_om + fixed_on + startup + no-load)")
+        if 'annual_penalty_cost_nzd' in total_row:
+            print(f"  Annual penalty cost (NZD):    {total_row['annual_penalty_cost_nzd']:12,.2f}")
+            print(f"    (includes: unserved + reserve penalties)")
         print(f"  Annual total cost (NZD):     {total_row['annual_total_cost_nzd']:12,.2f}")
-        print(f"  Avg cost per MWh_heat (NZD): {total_row['avg_cost_nzd_per_MWh_heat']:10.2f}")
+        if 'avg_operational_cost_nzd_per_MWh_heat' in total_row:
+            print(f"  Avg operational cost/MWh (NZD): {total_row['avg_operational_cost_nzd_per_MWh_heat']:10.2f}")
+        print(f"  Avg total cost per MWh_heat (NZD): {total_row['avg_cost_nzd_per_MWh_heat']:10.2f}")
     
     print("="*80)
     

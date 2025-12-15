@@ -215,7 +215,67 @@ def generate_hour_noise(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) 
     return pd.Series(factors, index=hourly_index, name='noise_factor')
 
 
-def generate_demandpack(config_path: str) -> pd.DataFrame:
+def apply_peak_cap(series: pd.Series, cap_mw: float, method: str, target_energy_GWh: float) -> pd.Series:
+    """
+    Apply peak cap while preserving total annual energy exactly.
+    
+    Args:
+        series: Hourly MW series
+        cap_mw: Peak capacity limit
+        method: Method to use ('clip_redistribute')
+        target_energy_GWh: Target annual energy (for verification)
+        
+    Returns:
+        Capped series with same total energy
+    """
+    if method != 'clip_redistribute':
+        raise ValueError(f"Unknown cap_method: {method}")
+    
+    result = series.copy()
+    max_iterations = 100
+    tolerance_MWh = 0.1  # 0.1 MWh tolerance
+    
+    for iteration in range(max_iterations):
+        # Clip to cap
+        clipped = result.clip(upper=cap_mw)
+        deficit_MWh = (result - clipped).sum()  # Energy that was clipped
+        
+        if deficit_MWh < tolerance_MWh:
+            break
+        
+        # Find hours with headroom (below cap)
+        headroom = cap_mw - clipped
+        headroom_mask = headroom > 1e-6
+        
+        if not headroom_mask.any():
+            raise ValueError(f"Cannot redistribute {deficit_MWh:.2f} MWh: no headroom available after capping to {cap_mw} MW")
+        
+        # Redistribute deficit proportionally to headroom
+        total_headroom = headroom[headroom_mask].sum()
+        if total_headroom < 1e-6:
+            raise ValueError(f"Cannot redistribute {deficit_MWh:.2f} MWh: insufficient headroom")
+        
+        redistribution = (headroom[headroom_mask] / total_headroom) * deficit_MWh
+        result[headroom_mask] = clipped[headroom_mask] + redistribution
+        result[~headroom_mask] = clipped[~headroom_mask]
+    
+    # Final energy closure check
+    final_energy_GWh = result.sum() / 1000.0
+    energy_error = abs(final_energy_GWh - target_energy_GWh)
+    if energy_error > 0.001:  # 1 MWh tolerance
+        raise ValueError(f"Peak cap energy closure failed: {final_energy_GWh:.6f} GWh != {target_energy_GWh:.6f} GWh (error: {energy_error:.6f} GWh)")
+    
+    # Verify peak cap
+    max_value = result.max()
+    if max_value > cap_mw + 1e-6:
+        raise ValueError(f"Peak cap violation: max={max_value:.2f} MW > cap={cap_mw} MW")
+    
+    print(f"[OK] Peak cap applied: max={max_value:.2f} MW <= {cap_mw} MW, energy preserved ({final_energy_GWh:.6f} GWh)")
+    
+    return result
+
+
+def generate_demandpack(config_path: str, cap_peak_mw_override: float = None) -> pd.DataFrame:
     """
     Main function to generate the DemandPack hourly heat demand profile.
     
@@ -253,6 +313,14 @@ def generate_demandpack(config_path: str) -> pd.DataFrame:
     scale = annual_heat_GWh / raw_GWh
     final_MW = raw_MW * scale
     
+    # Apply peak cap if specified (with energy preservation)
+    # CLI override takes precedence over config
+    cap_peak_mw = cap_peak_mw_override if cap_peak_mw_override is not None else config['general'].get('cap_peak_mw', None)
+    cap_method = config['general'].get('cap_method', 'clip_redistribute')
+    
+    if cap_peak_mw is not None and cap_peak_mw > 0:
+        final_MW = apply_peak_cap(final_MW, cap_peak_mw, cap_method, annual_heat_GWh)
+    
     # Build output DataFrame
     result = pd.DataFrame({
         'timestamp': hourly_index,
@@ -283,6 +351,8 @@ def main():
     parser = argparse.ArgumentParser(description='Generate DemandPack hourly heat demand')
     parser.add_argument('--config', default='Input/demandpack_config.toml',
                        help='Path to config TOML file')
+    parser.add_argument('--cap-peak-mw', type=float, default=None,
+                       help='Peak capacity cap (MW). If not specified, uses config value or no cap.')
     args = parser.parse_args()
     
     # Ensure output directory exists
@@ -291,7 +361,7 @@ def main():
     
     # Generate demandpack
     print("Generating DemandPack...")
-    df = generate_demandpack(args.config)
+    df = generate_demandpack(args.config, cap_peak_mw_override=args.cap_peak_mw)
     
     # Save CSV
     config = load_config(args.config)

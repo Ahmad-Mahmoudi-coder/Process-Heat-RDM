@@ -120,3 +120,49 @@ python -m src.site_dispatch_2020 --plot
 
 This creates `Output/Figures/heat_2020_unit_stack.png` showing unit dispatch over time with total demand overlay.
 
+## Dispatch Modes
+
+The dispatch module supports two modes:
+
+### Proportional Mode (Default)
+
+Allocates demand proportionally by unit capacity:
+
+```bash
+python -m src.site_dispatch_2020 --mode proportional
+```
+
+### Optimal Subset Mode
+
+Uses unit-commitment-lite logic with optimal subset selection per commitment block:
+
+```bash
+# Weekly blocks (168 hours)
+python -m src.site_dispatch_2020 --mode optimal_subset --commitment-block-hours 168 --plot
+
+# Daily blocks (24 hours)
+python -m src.site_dispatch_2020 --mode optimal_subset --commitment-block-hours 24 --plot
+```
+
+Optimal subset mode:
+- Enumerates all possible unit combinations per commitment block
+- Selects the lowest-cost subset that can meet demand
+- Enforces min up/down time constraints
+- Computes all cost components (fuel, carbon, var_om, fixed_on, startup)
+- Generates additional outputs with `_opt` suffix
+- Creates three diagnostic plots in `Output/Figures/`
+
+### Full Pipeline Runner
+
+To run the complete optimal dispatch pipeline from scratch:
+
+```bash
+python scripts/run_2020_dispatch_optimal.py
+```
+
+This script:
+- Cleans `Output/` (preserves `Backup/` if present)
+- Generates demand profile if needed
+- Runs optimal dispatch with weekly blocks
+- Generates all figures
+

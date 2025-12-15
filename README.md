@@ -30,17 +30,49 @@ python -m src.plot_demandpack_diagnostics
 
 ## Computing 2020 Site Dispatch
 
-To compute baseline utility dispatch for 2020:
+The dispatch module supports two modes:
+
+### Proportional Mode (Default)
+
+Allocates demand proportionally by unit capacity:
 
 ```bash
-python -m src.site_dispatch_2020
+python -m src.site_dispatch_2020 --mode proportional
 ```
 
-This allocates hourly heat demand across site utilities (coal boilers) proportionally by capacity and computes fuel consumption and CO2 emissions. Outputs:
+Outputs:
 - `Output/site_dispatch_2020_long.csv` - Long-form dispatch data
 - `Output/site_dispatch_2020_wide.csv` - Wide-form dispatch data
+- `Output/site_dispatch_2020_long_costed.csv` - Costed long-form data
+- `Output/site_dispatch_2020_summary.csv` - Annual summary by unit
 
-Add `--plot` flag to generate a stacked area plot: `Output/Figures/heat_2020_unit_stack.png`
+### Optimal Subset Mode
+
+Uses unit-commitment-lite logic with optimal subset selection:
+
+```bash
+# Weekly commitment blocks (168 hours)
+python -m src.site_dispatch_2020 --mode optimal_subset --commitment-block-hours 168 --plot
+
+# Daily commitment blocks (24 hours)
+python -m src.site_dispatch_2020 --mode optimal_subset --commitment-block-hours 24 --plot
+```
+
+Outputs:
+- `Output/site_dispatch_2020_long_costed_opt.csv` - Long-form with all cost components
+- `Output/site_dispatch_2020_wide_opt.csv` - Wide-form dispatch
+- `Output/site_dispatch_2020_summary_opt.csv` - Annual summary
+- `Output/Figures/heat_2020_unit_stack_opt.png` - Stacked dispatch plot
+- `Output/Figures/heat_2020_units_online_opt.png` - Units online over time
+- `Output/Figures/heat_2020_unit_utilisation_duration_opt.png` - Utilisation duration curves
+
+### Full Pipeline
+
+Run the complete optimal dispatch pipeline:
+
+```bash
+python scripts/run_2020_dispatch_optimal.py
+```
 
 ## Reproducibility
 

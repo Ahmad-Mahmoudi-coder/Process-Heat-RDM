@@ -8,7 +8,7 @@ targets with realistic seasonal, weekday, and hourly patterns.
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import sys
 
 try:
@@ -19,7 +19,7 @@ except ImportError:
     except ImportError:
         raise ImportError("Need tomllib (Python 3.11+) or tomli package")
 
-from src.time_utils import build_hourly_utc_index, to_iso_z
+from src.time_utils import build_hourly_utc_index, to_iso_z, parse_any_timestamp
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -214,6 +214,123 @@ def generate_hour_noise(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) 
     return pd.Series(factors, index=hourly_index, name='noise_factor')
 
 
+def load_and_resample_temperature(
+    config: Dict[str, Any], 
+    hourly_index: pd.DatetimeIndex,
+    target_site_id: str
+) -> Optional[pd.Series]:
+    """
+    Load temperature series and resample to hourly UTC index.
+    
+    Handles various input frequencies (half-hourly, hourly, etc.) and resamples
+    to match the DemandPack hourly index. If temperature is already hourly,
+    it passes through unchanged after reindexing.
+    
+    Args:
+        config: Configuration dict (may contain temperature settings)
+        hourly_index: Target hourly UTC DatetimeIndex
+        target_site_id: Site ID to filter temperature data
+        
+    Returns:
+        Series with temperature values aligned to hourly_index, or None if not configured
+    """
+    # Check if temperature is configured (optional feature)
+    if 'temperature' not in config:
+        return None
+    
+    temp_config = config['temperature']
+    if not temp_config.get('enabled', False):
+        return None
+    
+    temp_file = temp_config.get('file')
+    if not temp_file or not Path(temp_file).exists():
+        print(f"[SKIP] Temperature file not found: {temp_file}")
+        return None
+    
+    # Load temperature CSV
+    print(f"Loading temperature series from {temp_file}...")
+    temp_df = pd.read_csv(temp_file)
+    
+    # Detect timestamp column (support various names)
+    timestamp_col = None
+    for col in ['timestamp_utc', 'timestamp', 'datetime', 'date']:
+        if col in temp_df.columns:
+            timestamp_col = col
+            break
+    
+    if timestamp_col is None:
+        raise ValueError(f"Temperature CSV {temp_file} must have a timestamp column (timestamp_utc, timestamp, datetime, or date)")
+    
+    # Detect temperature value column
+    temp_col = None
+    for col in ['temp_C', 'temperature', 'temp', 'temperature_C']:
+        if col in temp_df.columns:
+            temp_col = col
+            break
+    
+    if temp_col is None:
+        raise ValueError(f"Temperature CSV {temp_file} must have a temperature column (temp_C, temperature, temp, or temperature_C)")
+    
+    # Filter by site_id if present
+    if 'site_id' in temp_df.columns:
+        temp_df = temp_df[temp_df['site_id'] == target_site_id].copy()
+        if len(temp_df) == 0:
+            raise ValueError(f"No temperature data found for site_id={target_site_id} in {temp_file}")
+    
+    # Parse timestamps to UTC
+    print(f"  Parsing timestamps from column '{timestamp_col}'...")
+    ts_dt_utc = parse_any_timestamp(temp_df[timestamp_col])
+    
+    # Log detected frequency
+    original_rowcount = len(temp_df)
+    print(f"  Original temperature data: {original_rowcount} rows")
+    
+    # Detect frequency by checking time differences
+    if len(ts_dt_utc) > 1:
+        time_diffs = ts_dt_utc.diff().dropna()
+        median_diff = time_diffs.median()
+        if median_diff <= pd.Timedelta('30min'):
+            detected_freq = '30min (half-hourly)'
+        elif median_diff <= pd.Timedelta('1h'):
+            detected_freq = '1h (hourly)'
+        else:
+            detected_freq = f'{median_diff} (irregular)'
+        print(f"  Detected frequency: {detected_freq}")
+    
+    # Set timestamp as index and resample to hourly
+    temp_df_indexed = temp_df.set_index(ts_dt_utc)
+    
+    # Resample to hourly (mean aggregation)
+    print(f"  Resampling to hourly (mean aggregation)...")
+    temp_hourly = temp_df_indexed.resample('H', label='left', closed='left').mean(numeric_only=True)
+    
+    resampled_rowcount = len(temp_hourly)
+    print(f"  After resampling: {resampled_rowcount} rows")
+    
+    if resampled_rowcount != original_rowcount:
+        print(f"  [INFO] Resampling occurred: {original_rowcount} -> {resampled_rowcount} rows")
+    
+    # Reindex to the DemandPack hourly index
+    print(f"  Reindexing to DemandPack hourly index ({len(hourly_index)} rows)...")
+    temp_hourly_reindexed = temp_hourly[temp_col].reindex(hourly_index)
+    
+    # Handle missing values
+    missing_count = temp_hourly_reindexed.isna().sum()
+    if missing_count > 0:
+        print(f"  [WARNING] {missing_count} missing values after reindexing, filling with interpolation...")
+        # Use time interpolation, fallback to forward fill
+        temp_hourly_reindexed = temp_hourly_reindexed.interpolate(method='time', limit_direction='both')
+        # Fill any remaining NaNs at the edges with forward/backward fill
+        temp_hourly_reindexed = temp_hourly_reindexed.ffill().bfill()
+        
+        if temp_hourly_reindexed.isna().any():
+            raise ValueError(f"Could not fill all missing temperature values. {temp_hourly_reindexed.isna().sum()} NaNs remain.")
+    
+    print(f"  [OK] Temperature series aligned to hourly index: {len(temp_hourly_reindexed)} rows")
+    
+    return pd.Series(temp_hourly_reindexed.values, index=hourly_index, name='temperature_C')
+
+
 def apply_peak_cap(series: pd.Series, cap_mw: float, method: str, target_energy_GWh: float) -> pd.Series:
     """
     Apply peak cap while preserving total annual energy exactly.
@@ -301,6 +418,9 @@ def generate_demandpack(config_path: str, cap_peak_mw_override: float = None) ->
     weekly = generate_weekly_drift(config, hourly_index)
     noise = generate_hour_noise(config, hourly_index)
     
+    # Load and resample temperature if configured
+    temperature = load_and_resample_temperature(config, hourly_index, target_site_id)
+    
     # Combine factors
     combined_factors = seasonal * weekday * hourly * weekly * noise
     
@@ -321,16 +441,45 @@ def generate_demandpack(config_path: str, cap_peak_mw_override: float = None) ->
         final_MW = apply_peak_cap(final_MW, cap_peak_mw, cap_method, annual_heat_GWh)
     
     # Build output DataFrame with timestamp_utc in ISO Z format
-    result = pd.DataFrame({
+    # Ensure all columns have the same length as hourly_index
+    expected_len = len(hourly_index)
+    
+    result_dict = {
         'timestamp_utc': to_iso_z(hourly_index),
-        'site_id': target_site_id,
-        'heat_demand_MW': final_MW,
+        'site_id': [target_site_id] * expected_len,  # Broadcast site_id to match length
+        'heat_demand_MW': final_MW.values if isinstance(final_MW, pd.Series) else final_MW,
         'seasonal_factor': seasonal.values,
         'weekday_factor': weekday.values,
         'hourly_factor': hourly.values,
         'weekly_factor': weekly.values,
         'noise_factor': noise.values,
-    })
+    }
+    
+    # Add temperature if available
+    if temperature is not None:
+        result_dict['temperature_C'] = temperature.values
+    
+    # Defensive assertion: all columns must have the same length
+    for col_name, col_data in result_dict.items():
+        actual_len = len(col_data) if hasattr(col_data, '__len__') else 1
+        assert actual_len == expected_len, (
+            f"Column '{col_name}' length mismatch: expected {expected_len} (hourly index length), "
+            f"got {actual_len}"
+        )
+    
+    # Additional assertion if temperature is used
+    if temperature is not None:
+        assert len(hourly_index) == len(final_MW) == len(temperature), (
+            f"Length mismatch: hourly_index={len(hourly_index)}, "
+            f"final_MW={len(final_MW)}, temperature={len(temperature)}"
+        )
+    
+    result = pd.DataFrame(result_dict)
+    
+    # Verify final DataFrame length
+    assert len(result) == expected_len, (
+        f"Output DataFrame length mismatch: expected {expected_len}, got {len(result)}"
+    )
     
     # Verify energy closure
     final_GWh = result['heat_demand_MW'].sum() / 1000.0

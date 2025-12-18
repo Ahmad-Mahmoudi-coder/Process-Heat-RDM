@@ -1,5 +1,0 @@
-epoch,epoch_semantics,is_leap_year,expected_hours,gxp_hourly_csv,gxp_report_json,incremental_demand_csv,notes
-2020,baseline_pre_EB1,TRUE,8784,gxp_hourly_2020.csv,gxp_hourly_2020_report.json,incremental_demand_2020.csv,Incremental demand placeholder is zeros; replace with site output when coupling.
-2025,steady_state_post_EB1,FALSE,8760,gxp_hourly_2025.csv,gxp_hourly_2025_report.json,incremental_demand_2025.csv,Incremental demand placeholder is zeros; replace with site output when coupling.
-2028,steady_state_post_EB2_EB3,TRUE,8784,gxp_hourly_2028.csv,gxp_hourly_2028_report.json,incremental_demand_2028.csv,Incremental demand placeholder is zeros; replace with site output when coupling.
-2035,decision_epoch,FALSE,8760,gxp_hourly_2035.csv,gxp_hourly_2035_report.json,incremental_demand_2035.csv,Incremental demand placeholder is zeros; replace with site output when coupling.

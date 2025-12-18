@@ -2,10 +2,12 @@
 SignalsPack-lite Loader
 
 Loads price and emissions signals from TOML configuration for different epochs.
+Also provides helpers for loading and validating timestamp alignment with demand data.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import sys
+import pandas as pd
 
 try:
     import tomllib
@@ -14,6 +16,8 @@ except ImportError:
         import tomli as tomllib
     except ImportError:
         raise ImportError("Need tomllib (Python 3.11+) or tomli package")
+
+from src.time_utils import parse_any_timestamp, build_hourly_utc_index, validate_time_alignment
 
 
 def load_signals_config(config_path: str = "Input/signals_config.toml") -> Dict[str, Any]:
@@ -95,4 +99,63 @@ def get_signals_for_epoch(config: Dict[str, Any], epoch_label: str) -> Dict[str,
         result[key] = float(value)
     
     return result
+
+
+def load_gxp_data(gxp_csv_path: str) -> pd.DataFrame:
+    """
+    Load GXP data CSV and parse timestamp_utc as UTC.
+    
+    Args:
+        gxp_csv_path: Path to GXP CSV file with timestamp_utc column
+        
+    Returns:
+        DataFrame with timestamp_utc parsed as UTC datetime64[ns, UTC]
+    """
+    df = pd.read_csv(gxp_csv_path)
+    
+    if 'timestamp_utc' not in df.columns:
+        raise ValueError(f"GXP CSV file {gxp_csv_path} must have 'timestamp_utc' column")
+    
+    # Parse timestamp_utc as UTC
+    df['timestamp_utc'] = parse_any_timestamp(df['timestamp_utc'])
+    
+    return df
+
+
+def validate_demand_gxp_alignment(demand_df: pd.DataFrame, gxp_df: pd.DataFrame, 
+                                   year: Optional[int] = None) -> None:
+    """
+    Validate that demand and GXP dataframes have aligned timestamps.
+    
+    Optionally validates that timestamps match the expected hourly UTC index for a given year.
+    
+    Args:
+        demand_df: DataFrame with timestamp_utc column
+        gxp_df: DataFrame with timestamp_utc column
+        year: Optional year to validate against build_hourly_utc_index(year)
+        
+    Raises:
+        ValueError: If alignment checks fail
+    """
+    # Use the general validation function
+    validate_time_alignment(demand_df, gxp_df)
+    
+    # If year is provided, also validate against expected index
+    if year is not None:
+        expected_index = build_hourly_utc_index(year)
+        
+        # Parse timestamps if needed
+        demand_ts = parse_any_timestamp(demand_df['timestamp_utc'])
+        gxp_ts = parse_any_timestamp(gxp_df['timestamp_utc'])
+        
+        # Check against expected index
+        if not demand_ts.equals(pd.Series(expected_index)):
+            raise ValueError(
+                f"demand_df timestamps do not match expected hourly UTC index for year {year}"
+            )
+        
+        if not gxp_ts.equals(pd.Series(expected_index)):
+            raise ValueError(
+                f"gxp_df timestamps do not match expected hourly UTC index for year {year}"
+            )
 

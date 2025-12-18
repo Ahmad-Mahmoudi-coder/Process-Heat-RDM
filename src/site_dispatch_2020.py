@@ -15,6 +15,7 @@ from typing import Tuple, Optional
 import sys
 
 from src.load_signals import load_signals_config, get_signals_for_epoch
+from src.time_utils import parse_any_timestamp, to_iso_z
 from typing import Dict
 
 
@@ -22,24 +23,36 @@ def load_hourly_demand(path: str) -> pd.DataFrame:
     """
     Load hourly demand CSV, parse timestamp, sort by time, and validate.
     
+    Supports both 'timestamp' and 'timestamp_utc' columns for backward compatibility.
+    Normalizes to timestamp_utc with UTC timezone.
+    
     Args:
         path: Path to hourly demand CSV file
         
     Returns:
-        DataFrame with timestamp and heat_demand_MW columns
+        DataFrame with timestamp_utc (UTC datetime) and heat_demand_MW columns
         
     Raises:
         ValueError: If number of rows is not 8760 (or 8784 for leap year)
     """
     df = pd.read_csv(path)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.sort_values('timestamp').reset_index(drop=True)
+    
+    # Normalize timestamp column (support both 'timestamp' and 'timestamp_utc')
+    if 'timestamp_utc' in df.columns:
+        df['timestamp_utc'] = parse_any_timestamp(df['timestamp_utc'])
+    elif 'timestamp' in df.columns:
+        # Backward compatibility: normalize old 'timestamp' column
+        df['timestamp_utc'] = parse_any_timestamp(df['timestamp'])
+    else:
+        raise ValueError(f"CSV file {path} must have either 'timestamp' or 'timestamp_utc' column")
+    
+    df = df.sort_values('timestamp_utc').reset_index(drop=True)
     
     # Check row count (2020 is a leap year, so 8784 hours)
     if len(df) not in [8760, 8784]:
         raise ValueError(f"Expected 8760 or 8784 rows (non-leap/leap year), got {len(df)}")
     
-    return df[['timestamp', 'heat_demand_MW']]
+    return df[['timestamp_utc', 'heat_demand_MW']]
 
 
 def load_utilities(path: str) -> pd.DataFrame:
@@ -132,14 +145,14 @@ def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame) -
     q_u_t = Q_t * (max_heat_MW_u / P_total)
     
     Args:
-        demand_df: DataFrame with timestamp and heat_demand_MW columns
+        demand_df: DataFrame with timestamp_utc and heat_demand_MW columns
         util_df: DataFrame with utility information including max_heat_MW, 
                  efficiency_th, co2_factor_t_per_MWh_fuel
         
     Returns:
         Tuple of (long-form DataFrame, wide-form DataFrame)
-        Long-form columns: timestamp, unit_id, heat_MW, fuel_MWh, co2_tonnes
-        Wide-form columns: timestamp, total_heat_MW, CB1_MW, CB2_MW, ...
+        Long-form columns: timestamp_utc, unit_id, heat_MW, fuel_MWh, co2_tonnes
+        Wide-form columns: timestamp_utc, total_heat_MW, CB1_MW, CB2_MW, ...
     """
     # Compute total installed capacity
     P_total = util_df['max_heat_MW'].sum()
@@ -153,7 +166,7 @@ def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame) -
     
     # For each hour, allocate demand proportionally
     for _, hour_row in demand_df.iterrows():
-        timestamp = hour_row['timestamp']
+        timestamp = hour_row['timestamp_utc']
         total_demand = hour_row['heat_demand_MW']
         
         for _, util_row in util_df.iterrows():
@@ -172,7 +185,7 @@ def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame) -
             co2_tonnes = fuel_MWh * co2_factor
             
             long_results.append({
-                'timestamp': timestamp,
+                'timestamp_utc': timestamp,
                 'unit_id': unit_id,
                 'heat_MW': heat_MW,
                 'fuel_MWh': fuel_MWh,
@@ -183,23 +196,23 @@ def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame) -
     
     # Create wide-form pivot
     dispatch_wide = dispatch_long.pivot_table(
-        index='timestamp',
+        index='timestamp_utc',
         columns='unit_id',
         values='heat_MW',
         aggfunc='sum'
     ).reset_index()
     
     # Rename unit columns to include _MW suffix
-    unit_columns = [col for col in dispatch_wide.columns if col != 'timestamp']
+    unit_columns = [col for col in dispatch_wide.columns if col != 'timestamp_utc']
     rename_dict = {col: f"{col}_MW" for col in unit_columns}
     dispatch_wide = dispatch_wide.rename(columns=rename_dict)
     
     # Add total_heat_MW column
     dispatch_wide['total_heat_MW'] = dispatch_wide[[col for col in dispatch_wide.columns if col.endswith('_MW') and col != 'total_heat_MW']].sum(axis=1)
     
-    # Reorder columns: timestamp, total_heat_MW, then unit columns
+    # Reorder columns: timestamp_utc, total_heat_MW, then unit columns
     unit_cols_sorted = sorted([col for col in dispatch_wide.columns if col.endswith('_MW') and col != 'total_heat_MW'])
-    dispatch_wide = dispatch_wide[['timestamp', 'total_heat_MW'] + unit_cols_sorted]
+    dispatch_wide = dispatch_wide[['timestamp_utc', 'total_heat_MW'] + unit_cols_sorted]
     
     return dispatch_long, dispatch_wide
 
@@ -259,7 +272,7 @@ def allocate_dispatch_optimal_subset(
     4. Enforce min up/down time constraints
     
     Args:
-        demand_df: DataFrame with timestamp and heat_demand_MW columns
+        demand_df: DataFrame with timestamp_utc and heat_demand_MW columns
         util_df: DataFrame with utility information
         signals: Signals dict from get_signals_for_epoch
         commitment_block_hours: Hours per commitment block (default 168 = weekly)
@@ -267,7 +280,7 @@ def allocate_dispatch_optimal_subset(
         
     Returns:
         Tuple of (long-form DataFrame, wide-form DataFrame)
-        Long-form includes: timestamp, unit_id, heat_MW, unit_on, fuel_MWh, co2_tonnes,
+        Long-form includes: timestamp_utc, unit_id, heat_MW, unit_on, fuel_MWh, co2_tonnes,
                            fuel_cost_nzd, carbon_cost_nzd, var_om_cost_nzd,
                            fixed_on_cost_nzd, startup_cost_nzd, total_cost_nzd, unserved_MW
     """
@@ -363,7 +376,7 @@ def allocate_dispatch_optimal_subset(
                 # Dispatch each hour in the block
                 subset_infeasible = False
                 for hour_idx, hour_row in block_demand.iterrows():
-                    timestamp = hour_row['timestamp']
+                    timestamp = hour_row['timestamp_utc']
                     demand_MW = hour_row['heat_demand_MW']
                     
                     # Initialize unit outputs
@@ -563,7 +576,7 @@ def allocate_dispatch_optimal_subset(
                         
                         # Always append results for all units
                         block_results.append({
-                            'timestamp': timestamp,
+                            'timestamp_utc': timestamp,
                             'unit_id': unit_id,
                             'heat_MW': heat_MW,
                             'unit_online': unit_online,  # 1 if in subset (can be online with heat_MW = 0)
@@ -649,14 +662,14 @@ def allocate_dispatch_optimal_subset(
     
     # Create wide-form pivot
     dispatch_wide = dispatch_long.pivot_table(
-        index='timestamp',
+        index='timestamp_utc',
         columns='unit_id',
         values='heat_MW',
         aggfunc='sum'
     ).reset_index()
     
     # Rename unit columns
-    unit_columns = [col for col in dispatch_wide.columns if col != 'timestamp']
+    unit_columns = [col for col in dispatch_wide.columns if col != 'timestamp_utc']
     rename_dict = {col: f"{col}_MW" for col in unit_columns}
     dispatch_wide = dispatch_wide.rename(columns=rename_dict)
     
@@ -666,12 +679,16 @@ def allocate_dispatch_optimal_subset(
     
     # Reorder columns
     unit_cols_sorted = sorted(unit_cols)
-    dispatch_wide = dispatch_wide[['timestamp', 'total_heat_MW'] + unit_cols_sorted]
+    dispatch_wide = dispatch_wide[['timestamp_utc', 'total_heat_MW'] + unit_cols_sorted]
     
     # Energy closure sanity check
+    # Parse timestamp_utc if needed for grouping
+    dispatch_long_for_closure = dispatch_long.copy()
+    if not pd.api.types.is_datetime64_any_dtype(dispatch_long_for_closure['timestamp_utc']):
+        dispatch_long_for_closure['timestamp_utc'] = parse_any_timestamp(dispatch_long_for_closure['timestamp_utc'])
     annual_demand_GWh = demand_df['heat_demand_MW'].sum() / 1000.0
     annual_dispatch_GWh = dispatch_wide['total_heat_MW'].sum() / 1000.0
-    annual_unserved_GWh = dispatch_long.groupby('timestamp')['unserved_MW'].first().sum() / 1000.0 if 'unserved_MW' in dispatch_long.columns else 0.0
+    annual_unserved_GWh = dispatch_long_for_closure.groupby('timestamp_utc')['unserved_MW'].first().sum() / 1000.0 if 'unserved_MW' in dispatch_long_for_closure.columns else 0.0
     
     print(f"\n[Energy Closure Check]")
     print(f"  Annual demand:    {annual_demand_GWh:.6f} GWh")
@@ -777,7 +794,7 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
             )
         
         # Startup costs: detect transitions OFF->ON
-        unit_data = unit_data.sort_values('timestamp')
+        unit_data = unit_data.sort_values('timestamp_utc')
         unit_data['prev_unit_on'] = unit_data['unit_on'].shift(1, fill_value=0)
         startup_mask = (unit_data['unit_on'] == 1) & (unit_data['prev_unit_on'] == 0)
         
@@ -786,15 +803,17 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
         if len(startup_hours) > 0:
             for _, startup_row in startup_hours.iterrows():
                 # Find block containing this hour
-                timestamp = startup_row['timestamp']
+                timestamp = startup_row['timestamp_utc']
                 # Calculate block start: round down to nearest block boundary
-                hours_since_start = (timestamp - pd.Timestamp('2020-01-01')).total_seconds() / 3600
+                # Use UTC timestamp for 2020-01-01
+                year_start = pd.Timestamp('2020-01-01', tz='UTC')
+                hours_since_start = (timestamp - year_start).total_seconds() / 3600
                 block_idx = int(hours_since_start // commitment_block_hours)
-                block_start = pd.Timestamp('2020-01-01') + pd.Timedelta(hours=block_idx * commitment_block_hours)
+                block_start = year_start + pd.Timedelta(hours=block_idx * commitment_block_hours)
                 block_end = block_start + pd.Timedelta(hours=commitment_block_hours)
                 block_mask = (dispatch_long['unit_id'] == unit_id) & \
-                            (dispatch_long['timestamp'] >= block_start) & \
-                            (dispatch_long['timestamp'] < block_end) & \
+                            (dispatch_long['timestamp_utc'] >= block_start) & \
+                            (dispatch_long['timestamp_utc'] < block_end) & \
                             (dispatch_long['unit_on'] == 1)
                 n_block_hours = block_mask.sum()
                 if n_block_hours > 0:
@@ -802,9 +821,9 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
     
     # Recompute online cost if needed (store once per hour)
     if 'online_cost_nzd' in dispatch_long.columns:
-        # Group by timestamp and compute online cost once per hour
-        for timestamp in dispatch_long['timestamp'].unique():
-            hour_mask = dispatch_long['timestamp'] == timestamp
+        # Group by timestamp_utc and compute online cost once per hour
+        for timestamp in dispatch_long['timestamp_utc'].unique():
+            hour_mask = dispatch_long['timestamp_utc'] == timestamp
             # Count online units for this hour
             n_online = dispatch_long.loc[hour_mask, 'unit_online'].sum() if 'unit_online' in dispatch_long.columns else 0
             if n_online > 0:
@@ -913,17 +932,17 @@ def aggregate_system_costs(dispatch_long: pd.DataFrame) -> dict:
     Returns dict with system cost totals.
     """
     system_costs = {}
-    # System penalties are stored once per hour (on first unit row), so aggregate by timestamp first
+    # System penalties are stored once per hour (on first unit row), so aggregate by timestamp_utc first
     if 'unserved_MW' in dispatch_long.columns:
-        system_costs['unserved_MW'] = dispatch_long.groupby('timestamp')['unserved_MW'].first().sum()
+        system_costs['unserved_MW'] = dispatch_long.groupby('timestamp_utc')['unserved_MW'].first().sum()
     if 'unserved_cost_nzd' in dispatch_long.columns:
-        system_costs['unserved_cost_nzd'] = dispatch_long.groupby('timestamp')['unserved_cost_nzd'].first().sum()
+        system_costs['unserved_cost_nzd'] = dispatch_long.groupby('timestamp_utc')['unserved_cost_nzd'].first().sum()
     if 'reserve_shortfall_MW' in dispatch_long.columns:
-        system_costs['reserve_shortfall_MW'] = dispatch_long.groupby('timestamp')['reserve_shortfall_MW'].first().sum()
+        system_costs['reserve_shortfall_MW'] = dispatch_long.groupby('timestamp_utc')['reserve_shortfall_MW'].first().sum()
     if 'reserve_penalty_cost_nzd' in dispatch_long.columns:
-        system_costs['reserve_penalty_cost_nzd'] = dispatch_long.groupby('timestamp')['reserve_penalty_cost_nzd'].first().sum()
+        system_costs['reserve_penalty_cost_nzd'] = dispatch_long.groupby('timestamp_utc')['reserve_penalty_cost_nzd'].first().sum()
     if 'online_cost_nzd' in dispatch_long.columns:
-        system_costs['online_cost_nzd'] = dispatch_long.groupby('timestamp')['online_cost_nzd'].first().sum()
+        system_costs['online_cost_nzd'] = dispatch_long.groupby('timestamp_utc')['online_cost_nzd'].first().sum()
     return system_costs
 
 
@@ -999,40 +1018,44 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     
     # Add annual diagnostics for optimal mode (before creating TOTAL row)
     total_dict_base = {}
-    if 'reserve_shortfall_MW' in dispatch_long.columns:
+        if 'reserve_shortfall_MW' in dispatch_long.columns:
         # Compute diagnostics across all hours (not per unit)
-        hourly_reserve = dispatch_long.groupby('timestamp')['reserve_shortfall_MW'].first()
+        # Parse timestamp_utc if needed for grouping
+        dispatch_long_for_diag = dispatch_long.copy()
+        if not pd.api.types.is_datetime64_any_dtype(dispatch_long_for_diag['timestamp_utc']):
+            dispatch_long_for_diag['timestamp_utc'] = parse_any_timestamp(dispatch_long_for_diag['timestamp_utc'])
+        hourly_reserve = dispatch_long_for_diag.groupby('timestamp_utc')['reserve_shortfall_MW'].first()
         hours_reserve_shortfall_gt_0 = (hourly_reserve > 0).sum()
         p95_reserve_shortfall_MW = hourly_reserve.quantile(0.95) if len(hourly_reserve) > 0 else 0.0
         
         # Average online units
-        if 'unit_online' in dispatch_long.columns:
-            hourly_online = dispatch_long.groupby('timestamp')['unit_online'].sum()
+        if 'unit_online' in dispatch_long_for_diag.columns:
+            hourly_online = dispatch_long_for_diag.groupby('timestamp_utc')['unit_online'].sum()
             avg_online_units = hourly_online.mean()
             
             # Seasonal averages (simple month split: May-Aug low, Oct-Mar peak)
-            dispatch_long['month'] = pd.to_datetime(dispatch_long['timestamp']).dt.month
+            dispatch_long_for_diag['month'] = dispatch_long_for_diag['timestamp_utc'].dt.month
             low_season_months = [5, 6, 7, 8]  # May-Aug
             peak_season_months = [10, 11, 12, 1, 2, 3]  # Oct-Mar
             
-            low_season_mask = dispatch_long['month'].isin(low_season_months)
-            peak_season_mask = dispatch_long['month'].isin(peak_season_months)
+            low_season_mask = dispatch_long_for_diag['month'].isin(low_season_months)
+            peak_season_mask = dispatch_long_for_diag['month'].isin(peak_season_months)
             
-            low_season_online = dispatch_long.loc[low_season_mask].groupby('timestamp')['unit_online'].sum().mean() if low_season_mask.sum() > 0 else 0.0
-            peak_season_online = dispatch_long.loc[peak_season_mask].groupby('timestamp')['unit_online'].sum().mean() if peak_season_mask.sum() > 0 else 0.0
+            low_season_online = dispatch_long_for_diag.loc[low_season_mask].groupby('timestamp_utc')['unit_online'].sum().mean() if low_season_mask.sum() > 0 else 0.0
+            peak_season_online = dispatch_long_for_diag.loc[peak_season_mask].groupby('timestamp_utc')['unit_online'].sum().mean() if peak_season_mask.sum() > 0 else 0.0
         else:
             avg_online_units = np.nan
             low_season_online = np.nan
             peak_season_online = np.nan
         
         # Compute average online headroom (online capacity - dispatch)
-        if 'unit_online' in dispatch_long.columns and 'reserve_shortfall_MW' in dispatch_long.columns:
+        if 'unit_online' in dispatch_long_for_diag.columns and 'reserve_shortfall_MW' in dispatch_long_for_diag.columns:
             # Reconstruct headroom from reserve shortfall: headroom = online_cap - dispatch
             # reserve_shortfall = max(0, reserve_req - headroom)
             # So if reserve_shortfall > 0: headroom = reserve_req - reserve_shortfall
             # If reserve_shortfall = 0: headroom >= reserve_req (we don't know exact, but can estimate)
             # Use direct aggregation instead of apply() to avoid FutureWarning
-            served_by_ts = dispatch_long.groupby('timestamp', sort=False)['heat_MW'].sum()
+            served_by_ts = dispatch_long_for_diag.groupby('timestamp_utc', sort=False)['heat_MW'].sum()
             hourly_reserve_req = reserve_frac * served_by_ts
             hourly_headroom_est = hourly_reserve_req - hourly_reserve
             # For hours with no shortfall, headroom is at least reserve_req, but we'll use the estimate
@@ -1063,7 +1086,11 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     annual_by_unit['avg_operational_cost_nzd_per_MWh_heat'] = annual_by_unit['avg_cost_nzd_per_MWh_heat']
     
     # Aggregate system-level costs separately (stored once per hour, not per unit)
-    system_costs = aggregate_system_costs(dispatch_long)
+    # Note: parse timestamp_utc if it's a string for grouping
+    dispatch_long_for_agg = dispatch_long.copy()
+    if not pd.api.types.is_datetime64_any_dtype(dispatch_long_for_agg['timestamp_utc']):
+        dispatch_long_for_agg['timestamp_utc'] = parse_any_timestamp(dispatch_long_for_agg['timestamp_utc'])
+    system_costs = aggregate_system_costs(dispatch_long_for_agg)
     
     # Extract penalty values from system_costs (always defined, defaults to 0.0)
     unserved_penalty_cost_nzd = system_costs.get('unserved_cost_nzd', 0.0)
@@ -1285,8 +1312,14 @@ def plot_dispatch_stack(dispatch_wide_path: str, output_path: str, demand_df: Op
         demand_df: Optional DataFrame with actual demand (timestamp, heat_demand_MW)
     """
     df = pd.read_csv(dispatch_wide_path)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.sort_values('timestamp').reset_index(drop=True)
+    # Support both timestamp and timestamp_utc for backward compatibility
+    if 'timestamp_utc' in df.columns:
+        df['timestamp_utc'] = parse_any_timestamp(df['timestamp_utc'])
+    elif 'timestamp' in df.columns:
+        df['timestamp_utc'] = parse_any_timestamp(df['timestamp'])
+    else:
+        raise ValueError(f"CSV file {dispatch_wide_path} must have either 'timestamp' or 'timestamp_utc' column")
+    df = df.sort_values('timestamp_utc').reset_index(drop=True)
     
     # Get unit columns (all columns ending in _MW except total_heat_MW)
     unit_cols = [col for col in df.columns if col.endswith('_MW') and col != 'total_heat_MW']
@@ -1294,7 +1327,7 @@ def plot_dispatch_stack(dispatch_wide_path: str, output_path: str, demand_df: Op
     fig, ax = plt.subplots(figsize=(16, 6))
     
     # Create stacked area plot
-    ax.stackplot(df['timestamp'], 
+    ax.stackplot(df['timestamp_utc'], 
                  [df[col] for col in unit_cols],
                  labels=[col.replace('_MW', '') for col in unit_cols],
                  alpha=0.7)
@@ -1302,14 +1335,18 @@ def plot_dispatch_stack(dispatch_wide_path: str, output_path: str, demand_df: Op
     # Overlay black line for total demand (visible above stack)
     if demand_df is not None and 'heat_demand_MW' in demand_df.columns:
         demand_df = demand_df.copy()
-        demand_df['timestamp'] = pd.to_datetime(demand_df['timestamp'])
-        df_merged = df.merge(demand_df[['timestamp', 'heat_demand_MW']], on='timestamp', how='left')
+        # Support both timestamp and timestamp_utc
+        if 'timestamp_utc' in demand_df.columns:
+            demand_df['timestamp_utc'] = parse_any_timestamp(demand_df['timestamp_utc'])
+        elif 'timestamp' in demand_df.columns:
+            demand_df['timestamp_utc'] = parse_any_timestamp(demand_df['timestamp'])
+        df_merged = df.merge(demand_df[['timestamp_utc', 'heat_demand_MW']], on='timestamp_utc', how='left')
         demand_values = df_merged['heat_demand_MW'].fillna(df['total_heat_MW'])
-        ax.plot(df['timestamp'], demand_values,
+        ax.plot(df['timestamp_utc'], demand_values,
                 color='black', linewidth=2.0, linestyle='-', label='Total demand', zorder=20)
         ymax_data = max(demand_values.max(), df[unit_cols].sum(axis=1).max() if unit_cols else 0)
     elif 'total_heat_MW' in df.columns:
-        ax.plot(df['timestamp'], df['total_heat_MW'],
+        ax.plot(df['timestamp_utc'], df['total_heat_MW'],
                 color='black', linewidth=2.0, linestyle='-', label='Total demand', zorder=20)
         ymax_data = max(df['total_heat_MW'].max(), df[unit_cols].sum(axis=1).max() if unit_cols else 0)
     else:
@@ -1349,8 +1386,14 @@ def plot_units_online(dispatch_long_path: str, output_path: str):
         output_path: Path to save the figure
     """
     df = pd.read_csv(dispatch_long_path)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.sort_values('timestamp').reset_index(drop=True)
+    # Support both timestamp and timestamp_utc
+    if 'timestamp_utc' in df.columns:
+        df['timestamp_utc'] = parse_any_timestamp(df['timestamp_utc'])
+    elif 'timestamp' in df.columns:
+        df['timestamp_utc'] = parse_any_timestamp(df['timestamp'])
+    else:
+        raise ValueError(f"CSV file {dispatch_long_path} must have either 'timestamp' or 'timestamp_utc' column")
+    df = df.sort_values('timestamp_utc').reset_index(drop=True)
     
     # Count units online per hour using unit_online (in subset, can be hot standby)
     # Use unit_online if available, otherwise fall back to unit_on for backwards compatibility
@@ -1361,21 +1404,21 @@ def plot_units_online(dispatch_long_path: str, output_path: str):
         online_col = 'unit_on'
         plot_label = 'Units Firing (heat_MW > 0)'
     
-    units_online = df.groupby('timestamp')[online_col].sum().reset_index()
-    units_online.columns = ['timestamp', 'n_units_online']
+    units_online = df.groupby('timestamp_utc')[online_col].sum().reset_index()
+    units_online.columns = ['timestamp_utc', 'n_units_online']
     
     # Compute daily mean
-    units_online['date'] = units_online['timestamp'].dt.date
+    units_online['date'] = units_online['timestamp_utc'].dt.date
     daily_mean = units_online.groupby('date')['n_units_online'].mean().reset_index()
-    daily_mean['timestamp'] = pd.to_datetime(daily_mean['date'])
+    daily_mean['timestamp_utc'] = pd.to_datetime(daily_mean['date']).dt.tz_localize('UTC')
     
     fig, ax = plt.subplots(figsize=(14, 6))
     
     # Plot daily mean
-    ax.plot(daily_mean['timestamp'], daily_mean['n_units_online'],
+    ax.plot(daily_mean['timestamp_utc'], daily_mean['n_units_online'],
             color='darkblue', linewidth=1.5, label='Daily mean')
     
-    ax.set_xlabel('Date', fontsize=12)
+    ax.set_xlabel('Date (UTC)', fontsize=12)
     ax.set_ylabel('Number of Units Online', fontsize=12)
     ax.set_title(f'{plot_label} - 2020', fontsize=14, fontweight='bold')
     ax.set_ylim(bottom=0)
@@ -1403,8 +1446,14 @@ def plot_unit_utilisation_duration(dispatch_long_path: str, output_path: str,
         utilities_csv: Path to utilities CSV to get max_heat_MW and availability_factor
     """
     df = pd.read_csv(dispatch_long_path)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.sort_values('timestamp').reset_index(drop=True)
+    # Support both timestamp and timestamp_utc
+    if 'timestamp_utc' in df.columns:
+        df['timestamp_utc'] = parse_any_timestamp(df['timestamp_utc'])
+    elif 'timestamp' in df.columns:
+        df['timestamp_utc'] = parse_any_timestamp(df['timestamp'])
+    else:
+        raise ValueError(f"CSV file {dispatch_long_path} must have either 'timestamp' or 'timestamp_utc' column")
+    df = df.sort_values('timestamp_utc').reset_index(drop=True)
     
     # Load utilities to get actual max capacity
     util_df = pd.read_csv(utilities_csv)
@@ -1488,20 +1537,31 @@ def main():
                        help='Path to signals config TOML file')
     parser.add_argument('--epoch', default='2020',
                        help='Epoch label for signals (default: 2020)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                       help='Output directory (default: Output/)')
     args = parser.parse_args()
+    
+    # Determine output directory
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = Path('Output')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir = output_dir / 'Figures'
+    figures_dir.mkdir(parents=True, exist_ok=True)
     
     # Set default output paths based on mode
     if args.out_dispatch_long is None:
         if args.mode == 'proportional':
-            args.out_dispatch_long = 'Output/site_dispatch_2020_long.csv'
+            args.out_dispatch_long = str(output_dir / 'site_dispatch_2020_long.csv')
         else:
-            args.out_dispatch_long = 'Output/site_dispatch_2020_long_costed_opt.csv'
+            args.out_dispatch_long = str(output_dir / 'site_dispatch_2020_long_costed_opt.csv')
     
     if args.out_dispatch_wide is None:
         if args.mode == 'proportional':
-            args.out_dispatch_wide = 'Output/site_dispatch_2020_wide.csv'
+            args.out_dispatch_wide = str(output_dir / 'site_dispatch_2020_wide.csv')
         else:
-            args.out_dispatch_wide = 'Output/site_dispatch_2020_wide_opt.csv'
+            args.out_dispatch_wide = str(output_dir / 'site_dispatch_2020_wide_opt.csv')
     
     # Load data
     print(f"Loading hourly demand from {args.demand_csv}...")
@@ -1537,17 +1597,24 @@ def main():
             online_cost_applies_when=args.online_cost_applies_when
         )
     
+    # Convert timestamp_utc to ISO Z format for CSV output (keep datetime internally)
+    dispatch_long_for_csv = dispatch_long.copy()
+    dispatch_wide_for_csv = dispatch_wide.copy()
+    dispatch_long_for_csv['timestamp_utc'] = to_iso_z(dispatch_long_for_csv['timestamp_utc'])
+    dispatch_wide_for_csv['timestamp_utc'] = to_iso_z(dispatch_wide_for_csv['timestamp_utc'])
+    
     # Save outputs
     print(f"Saving long-form dispatch to {args.out_dispatch_long}...")
-    dispatch_long.to_csv(args.out_dispatch_long, index=False)
+    dispatch_long_for_csv.to_csv(args.out_dispatch_long, index=False)
     
     # For proportional mode, also save costed version
     if args.mode == 'proportional':
-        print(f"Saving costed long-form dispatch to Output/site_dispatch_2020_long_costed.csv...")
-        dispatch_long.to_csv('Output/site_dispatch_2020_long_costed.csv', index=False)
+        costed_path = str(output_dir / 'site_dispatch_2020_long_costed.csv')
+        print(f"Saving costed long-form dispatch to {costed_path}...")
+        dispatch_long_for_csv.to_csv(costed_path, index=False)
     
     print(f"Saving wide-form dispatch to {args.out_dispatch_wide}...")
-    dispatch_wide.to_csv(args.out_dispatch_wide, index=False)
+    dispatch_wide_for_csv.to_csv(args.out_dispatch_wide, index=False)
     
     # Compute annual summary
     print("\nComputing annual summary...")
@@ -1556,9 +1623,9 @@ def main():
     
     # Save summary CSV
     if args.mode == 'proportional':
-        summary_path = 'Output/site_dispatch_2020_summary.csv'
+        summary_path = str(output_dir / 'site_dispatch_2020_summary.csv')
     else:
-        summary_path = 'Output/site_dispatch_2020_summary_opt.csv'
+        summary_path = str(output_dir / 'site_dispatch_2020_summary_opt.csv')
     print(f"Saving annual summary to {summary_path}...")
     # Assert unit_id column exists before saving
     assert 'unit_id' in annual_summary.columns, "unit_id column missing before CSV write"
@@ -1696,7 +1763,11 @@ def main():
         # Energy closure summary
         annual_demand_GWh = demand_df['heat_demand_MW'].sum() / 1000.0
         annual_served_GWh = dispatch_wide['total_heat_MW'].sum() / 1000.0
-        annual_unserved_GWh = dispatch_long.groupby('timestamp')['unserved_MW'].first().sum() / 1000.0 if 'unserved_MW' in dispatch_long.columns else 0.0
+        # Parse timestamp_utc if needed for grouping
+        dispatch_long_for_summary = dispatch_long.copy()
+        if not pd.api.types.is_datetime64_any_dtype(dispatch_long_for_summary['timestamp_utc']):
+            dispatch_long_for_summary['timestamp_utc'] = parse_any_timestamp(dispatch_long_for_summary['timestamp_utc'])
+        annual_unserved_GWh = dispatch_long_for_summary.groupby('timestamp_utc')['unserved_MW'].first().sum() / 1000.0 if 'unserved_MW' in dispatch_long_for_summary.columns else 0.0
         
         print("\n[Annual Energy Summary]")
         print(f"  Annual demand:    {annual_demand_GWh:.6f} GWh")
@@ -1720,8 +1791,6 @@ def main():
     # Generate plots if requested (with error handling)
     if args.plot:
         print("\nGenerating dispatch plots...")
-        figures_dir = Path('Output/Figures')
-        figures_dir.mkdir(parents=True, exist_ok=True)
         
         try:
             if args.mode == 'proportional':

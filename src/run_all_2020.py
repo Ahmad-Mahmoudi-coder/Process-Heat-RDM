@@ -1,7 +1,9 @@
 """
 Run-from-scratch convenience script for 2020 DemandPack and dispatch.
 
-Deletes existing outputs and regenerates:
+Non-destructive by default: outputs go to Output/runs/<run_id>/ and Output/latest/
+
+Regenerates:
 1. DemandPack hourly demand profile
 2. All DemandPack diagnostic figures
 3. Optimal subset dispatch with plots
@@ -13,32 +15,15 @@ matplotlib.use('Agg')  # Non-interactive backend
 import subprocess
 import sys
 from pathlib import Path
-import shutil
+import argparse
+
+from src.run_utils import (
+    generate_run_id, setup_run_dir, update_latest_symlink,
+    archive_latest, clean_latest
+)
 
 
-def delete_outputs():
-    """Delete existing CSV and PNG outputs, keeping folder structure."""
-    output_dir = Path('Output')
-    figures_dir = output_dir / 'Figures'
-    
-    print("Cleaning existing outputs...")
-    
-    # Delete CSV files in Output/ (but keep the directory)
-    if output_dir.exists():
-        for csv_file in output_dir.glob('*.csv'):
-            csv_file.unlink()
-            print(f"  Deleted {csv_file}")
-    
-    # Delete PNG files in Output/Figures/ (but keep the directory)
-    if figures_dir.exists():
-        for png_file in figures_dir.glob('*.png'):
-            png_file.unlink()
-            print(f"  Deleted {png_file}")
-    
-    print("[OK] Outputs cleaned\n")
-
-
-def run_command(cmd, description):
+def run_command(cmd, description, output_dir: Path):
     """Run a command and handle errors."""
     print(f"{'='*60}")
     print(f"{description}")
@@ -56,53 +41,86 @@ def run_command(cmd, description):
 
 def main():
     """Main entrypoint."""
+    parser = argparse.ArgumentParser(
+        description='Run 2020 DemandPack and dispatch pipeline (non-destructive)'
+    )
+    parser.add_argument('--run-id', type=str, default=None,
+                       help='Optional run ID override (default: auto-generated YYYYMMDD_HHMMSS)')
+    parser.add_argument('--clean', action='store_true',
+                       help='Clean Output/latest/ before running (optional)')
+    parser.add_argument('--archive', action='store_true',
+                       help='Archive Output/latest/ to Output/_archive/<run_id>/ before running (optional)')
+    args = parser.parse_args()
+    
     print("="*60)
     print("2020 DemandPack and Dispatch - Full Pipeline")
     print("="*60)
     print()
     
-    # Step 1: Clean outputs
-    delete_outputs()
+    # Generate or use provided run ID
+    run_id = args.run_id if args.run_id else generate_run_id()
+    print(f"Run ID: {run_id}")
     
-    # Step 2: Read total site capacity from utilities
+    # Handle archive/clean options
+    if args.archive:
+        archive_latest(run_id)
+    elif args.clean:
+        clean_latest()
+    
+    # Setup run directory
+    run_dir = setup_run_dir(run_id)
+    print(f"Output directory: {run_dir}")
+    print()
+    
+    # Step 1: Read total site capacity from utilities
     import pandas as pd
     util_df = pd.read_csv('Input/site_utilities_2020.csv')
     total_capacity_MW = util_df['max_heat_MW'].sum()
     print(f"Total site capacity: {total_capacity_MW:.2f} MW")
+    print()
     
-    # Step 3: Generate DemandPack with peak cap
+    # Step 2: Generate DemandPack with peak cap
+    demand_csv = str(run_dir / 'hourly_heat_demand_2020.csv')
     run_command(
         ['python', '-m', 'src.generate_demandpack', '--config', 'Input/demandpack_config.toml',
-         '--cap-peak-mw', str(total_capacity_MW)],
-        "Step 1: Generate DemandPack hourly demand profile"
+         '--cap-peak-mw', str(total_capacity_MW), '--output-dir', str(run_dir)],
+        "Step 1: Generate DemandPack hourly demand profile",
+        run_dir
     )
     
-    # Step 4: Generate DemandPack diagnostic figures
+    # Step 3: Generate DemandPack diagnostic figures
+    figures_dir = run_dir / 'Figures'
     run_command(
         ['python', '-m', 'src.plot_demandpack_diagnostics', 
          '--full-diagnostics', 
          '--config', 'Input/demandpack_config.toml',
-         '--data', 'Output/hourly_heat_demand_2020.csv'],
-        "Step 2: Generate DemandPack diagnostic figures"
+         '--data', demand_csv,
+         '--output-dir', str(run_dir)],
+        "Step 2: Generate DemandPack diagnostic figures",
+        run_dir
     )
     
-    # Step 5: Run optimal subset dispatch with plots (reserve penalties OFF by default)
+    # Step 4: Run optimal subset dispatch with plots (reserve penalties OFF by default)
     run_command(
         ['python', '-m', 'src.site_dispatch_2020',
          '--mode', 'optimal_subset',
          '--plot',
-         '--no-load-cost-nzd-per-h', '50.0'],
-        "Step 3: Compute optimal subset dispatch and generate plots"
+         '--no-load-cost-nzd-per-h', '50.0',
+         '--demand-csv', demand_csv,
+         '--output-dir', str(run_dir)],
+        "Step 3: Compute optimal subset dispatch and generate plots",
+        run_dir
     )
     
-    # Step 6: Run regional electricity PoC (if input files exist)
+    # Step 5: Run regional electricity PoC (if input files exist)
     baseline_path = Path('Input/gxp_baseline_import_hourly_2020.csv')
     capacity_path = Path('Input/gxp_headroom_hourly_2020.csv')
-    incremental_path = Path('Output/site_electricity_incremental_2020.csv')
+    incremental_path = run_dir / 'site_electricity_incremental_2020.csv'
     tariff_path = Path('Input/gxp_tariff_hourly_2020.csv')
     
     if all(p.exists() for p in [baseline_path, capacity_path, tariff_path]):
         if incremental_path.exists():
+            regional_output = str(run_dir / 'regional_electricity_signals_2020.csv')
             run_command(
                 ['python', '-m', 'src.regional_electricity_poc',
                  '--epoch', '2020',
@@ -110,8 +128,9 @@ def main():
                  '--capacity', str(capacity_path),
                  '--incremental', str(incremental_path),
                  '--tariff', str(tariff_path),
-                 '--out', 'Output/regional_electricity_signals_2020.csv'],
-                "Step 4: Compute regional electricity signals (GXP capacity PoC)"
+                 '--out', regional_output],
+                "Step 4: Compute regional electricity signals (GXP capacity PoC)",
+                run_dir
             )
         else:
             print(f"[SKIP] Regional electricity PoC: {incremental_path} not found")
@@ -119,7 +138,6 @@ def main():
         print("[SKIP] Regional electricity PoC: Required input files not found")
     
     # Verify all required figures exist
-    figures_dir = Path('Output/Figures')
     demandpack_plots = [
         'heat_2020_timeseries.png',
         'heat_2020_daily_envelope.png',
@@ -143,18 +161,24 @@ def main():
             print(f"  - {p}")
         sys.exit(1)
     
+    # Update Output/latest/ to point to this run
+    print("\nUpdating Output/latest/...")
+    update_latest_symlink(run_id)
+    
     print("="*60)
     print("Pipeline completed successfully!")
     print("="*60)
+    print(f"\nRun ID: {run_id}")
+    print(f"Output directory: {run_dir}")
     print("\nGenerated outputs:")
-    print("  CSVs in Output/:")
-    output_dir = Path('Output')
-    for csv_file in sorted(output_dir.glob('*.csv')):
+    print("  CSVs:")
+    for csv_file in sorted(run_dir.glob('*.csv')):
         print(f"    - {csv_file.name}")
     
-    print("\n  Figures in Output/Figures/:")
+    print("\n  Figures:")
     for png_file in sorted(figures_dir.glob('*.png')):
         print(f"    - {png_file.name}")
+    print(f"\nOutput/latest/ has been updated to mirror this run.")
     print()
 
 

@@ -19,6 +19,8 @@ except ImportError:
     except ImportError:
         raise ImportError("Need tomllib (Python 3.11+) or tomli package")
 
+from src.time_utils import build_hourly_utc_index, to_iso_z
+
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load and parse TOML configuration file."""
@@ -50,10 +52,7 @@ def load_annual_anchor(config: Dict[str, Any]) -> float:
     return float(annual_heat_GWh)
 
 
-def build_hourly_index(year: int, hours_per_year: int) -> pd.DatetimeIndex:
-    """Build hourly DateTimeIndex for the full year."""
-    start = pd.Timestamp(f'{year}-01-01 00:00:00')
-    return pd.date_range(start=start, periods=hours_per_year, freq='h')
+# build_hourly_index is now replaced by build_hourly_utc_index from time_utils
 
 
 def load_seasonal_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) -> pd.Series:
@@ -285,15 +284,15 @@ def generate_demandpack(config_path: str, cap_peak_mw_override: float = None) ->
     
     # Load annual anchor
     annual_heat_GWh = load_annual_anchor(config)
-    hours_per_year = config['general']['hours_per_year']
     target_year = config['general']['target_year']
     target_site_id = config['general']['target_site_id']
     
+    # Build hourly index in UTC (handles leap years automatically)
+    hourly_index = build_hourly_utc_index(target_year)
+    hours_per_year = len(hourly_index)
+    
     # Compute average MW
     avg_MW = annual_heat_GWh * 1000.0 / hours_per_year
-    
-    # Build hourly index
-    hourly_index = build_hourly_index(target_year, hours_per_year)
     
     # Load and compute all factors
     seasonal = load_seasonal_factors(config, hourly_index)
@@ -321,9 +320,9 @@ def generate_demandpack(config_path: str, cap_peak_mw_override: float = None) ->
     if cap_peak_mw is not None and cap_peak_mw > 0:
         final_MW = apply_peak_cap(final_MW, cap_peak_mw, cap_method, annual_heat_GWh)
     
-    # Build output DataFrame
+    # Build output DataFrame with timestamp_utc in ISO Z format
     result = pd.DataFrame({
-        'timestamp': hourly_index,
+        'timestamp_utc': to_iso_z(hourly_index),
         'site_id': target_site_id,
         'heat_demand_MW': final_MW,
         'seasonal_factor': seasonal.values,
@@ -353,20 +352,28 @@ def main():
                        help='Path to config TOML file')
     parser.add_argument('--cap-peak-mw', type=float, default=None,
                        help='Peak capacity cap (MW). If not specified, uses config value or no cap.')
+    parser.add_argument('--output-dir', type=str, default=None,
+                       help='Output directory (default: Output/ or from config)')
     args = parser.parse_args()
     
-    # Ensure output directory exists
-    output_path = Path('Output')
-    output_path.mkdir(exist_ok=True)
+    # Determine output directory
+    if args.output_dir:
+        output_path = Path(args.output_dir)
+    else:
+        output_path = Path('Output')
+    output_path.mkdir(parents=True, exist_ok=True)
     
     # Generate demandpack
     print("Generating DemandPack...")
     df = generate_demandpack(args.config, cap_peak_mw_override=args.cap_peak_mw)
     
-    # Save CSV
+    # Save CSV (timestamp_utc is already in ISO Z format as string)
     config = load_config(args.config)
-    output_csv = config['general']['output_csv']
-    df['timestamp'] = df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+    # Use output_dir if provided, otherwise use config value
+    if args.output_dir:
+        output_csv = output_path / Path(config['general']['output_csv']).name
+    else:
+        output_csv = config['general']['output_csv']
     df.to_csv(output_csv, index=False)
     print(f"[OK] Saved output to {output_csv}")
     
@@ -377,8 +384,9 @@ def main():
     print(f"  95th percentile: {df['heat_demand_MW'].quantile(0.95):.2f} MW")
     print(f"  Total energy: {df['heat_demand_MW'].sum() / 1000.0:.6f} GWh")
     
-    # Monthly totals
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # Monthly totals (parse timestamp_utc for month extraction)
+    from src.time_utils import parse_any_timestamp
+    df['timestamp'] = parse_any_timestamp(df['timestamp_utc'])
     df['month'] = df['timestamp'].dt.month
     monthly = df.groupby('month')['heat_demand_MW'].sum() / 1000.0
     print("\nMonthly totals (GWh):")

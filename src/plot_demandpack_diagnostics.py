@@ -308,19 +308,32 @@ def main():
                        help='Path to config TOML file')
     parser.add_argument('--data', default='Output/hourly_heat_demand_2020.csv',
                        help='Path to generated demand CSV')
+    parser.add_argument('--output-dir', type=str, default=None,
+                       help='Output directory (default: Output/)')
     args = parser.parse_args()
     
     # Load config
     config = load_config(args.config)
     
-    # Ensure Figures directory exists
-    figures_dir = Path('Output') / 'Figures'
+    # Determine output directory
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        output_dir = Path('Output')
+    figures_dir = output_dir / 'Figures'
     figures_dir.mkdir(parents=True, exist_ok=True)
     
     # Load data
     print(f"Loading data from {args.data}...")
     df = pd.read_csv(args.data)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    # Support both timestamp and timestamp_utc for backward compatibility
+    from src.time_utils import parse_any_timestamp
+    if 'timestamp_utc' in df.columns:
+        df['timestamp'] = parse_any_timestamp(df['timestamp_utc'])
+    elif 'timestamp' in df.columns:
+        df['timestamp'] = parse_any_timestamp(df['timestamp'])
+    else:
+        raise ValueError("CSV must have either 'timestamp' or 'timestamp_utc' column")
     df = df.sort_values('timestamp').reset_index(drop=True)
     if 'hour' not in df.columns:
         df['hour'] = df['timestamp'].dt.hour
@@ -390,6 +403,8 @@ if __name__ == '__main__':
                        help='Generate all diagnostic plots (default: just timeseries and envelope)')
     parser.add_argument('--config', default='Input/demandpack_config.toml',
                        help='Path to config TOML file (for full diagnostics)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                       help='Output directory (default: Output/)')
     args = parser.parse_args()
     
     if args.full_diagnostics:
@@ -398,22 +413,35 @@ if __name__ == '__main__':
         # Temporarily replace sys.argv to pass args to main()
         old_argv = sys.argv
         sys.argv = [sys.argv[0], '--config', args.config, '--data', args.data]
+        if args.output_dir:
+            sys.argv.extend(['--output-dir', args.output_dir])
         try:
             main()
         finally:
             sys.argv = old_argv
     else:
-        # Simple mode: load data and generate two plots in Output/Figures/
+        # Simple mode: load data and generate two plots
         print(f"Loading data from {args.data}...")
         df = pd.read_csv(args.data)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        # Support both timestamp and timestamp_utc for backward compatibility
+        from src.time_utils import parse_any_timestamp
+        if 'timestamp_utc' in df.columns:
+            df['timestamp'] = parse_any_timestamp(df['timestamp_utc'])
+        elif 'timestamp' in df.columns:
+            df['timestamp'] = parse_any_timestamp(df['timestamp'])
+        else:
+            raise ValueError("CSV must have either 'timestamp' or 'timestamp_utc' column")
         df = df.sort_values('timestamp').reset_index(drop=True)
         
-        # Ensure Figures directory exists
-        figures_dir = Path('Output') / 'Figures'
+        # Determine output directory
+        if args.output_dir:
+            output_dir = Path(args.output_dir)
+        else:
+            output_dir = Path('Output')
+        figures_dir = output_dir / 'Figures'
         figures_dir.mkdir(parents=True, exist_ok=True)
         
-        # Generate the two requested plots in Output/Figures/
+        # Generate the two requested plots
         print("Generating plots...")
         plot_hourly_timeseries(df, str(figures_dir / "heat_2020_timeseries.png"))
         plot_daily_envelope(df, str(figures_dir / "heat_2020_daily_envelope.png"))

@@ -1,0 +1,4 @@
+[submodule "modules/edendale_gxp"]
+	path = modules/edendale_gxp
+	url = https://github.com/Ahmad-Mahmoudi-coder/Edendale_GXP.git
+	branch = main

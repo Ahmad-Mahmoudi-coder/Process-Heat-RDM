@@ -1,0 +1,160 @@
+{
+  "schema_version": "gxp_hourly_report_v1",
+  "generation_timestamp": "2025-12-18T08:56:53.283730",
+  "epoch": 2025,
+  "epoch_semantics": "steady_state_post_EB1",
+  "mode": "synthetic",
+  "output_file": "C:\\Users\\qsp4195\\OneDrive - AUT University\\GXP\\outputs_latest\\gxp_hourly_2025.csv",
+  "file_size_bytes": 515178,
+  "file_hash_sha256": "3770c50f472b3373ad945a986c061c6b11d25646dd3387268ff47c1b8e098ee2",
+  "git_commit_hash": null,
+  "git_detected": false,
+  "units": {
+    "headroom_MW": "MW",
+    "baseline_import_MW": "MW",
+    "capacity_MW": "MW",
+    "tariff_nzd_per_MWh": "NZD/MWh"
+  },
+  "time_policy": {
+    "timestamp_output_tz": "UTC",
+    "tariff_clock_tz": "Pacific/Auckland",
+    "dst_policy": "iana",
+    "time_index_start": "2025-01-01T00:00:00Z",
+    "time_index_end": "2025-12-31T23:00:00Z",
+    "n_hours": 8760
+  },
+  "random_seed_base": 42,
+  "random_seed_epoch": 2067,
+  "rng_bit_generator": "PCG64",
+  "config_used": {
+    "baseline_floor_MW": 3.5,
+    "monthly_mean_import_mw": [
+      21,
+      21,
+      20,
+      19,
+      16,
+      7,
+      6,
+      7,
+      14,
+      24,
+      25,
+      23
+    ],
+    "noise_sigma_mw": 0.4,
+    "rho_ar1": 0.9,
+    "weekly_var_amp_mw": 0.4,
+    "weekend_multiplier": 0.97,
+    "reserve_margin_MW_requested": 0.5,
+    "reserve_margin_MW_applied": 0.5,
+    "smooth_clip": true,
+    "smooth_k": 10.0
+  },
+  "validation_results": {
+    "seasonal_means_MW": {
+      "jan_mar": 20.86985165714212,
+      "jun_aug": 6.913496836628121,
+      "oct_nov": 25.272691944923007
+    },
+    "floor_hours": {
+      "count": 0,
+      "fraction": 0.0,
+      "pct": 0.0
+    },
+    "headroom_statistics": {
+      "min_MW": 4.697958756713167,
+      "mean_MW": 16.34879988301514,
+      "max_MW": 28.860451962387867
+    },
+    "headroom_percentiles_MW": {
+      "p1": 5.9580430508423765,
+      "p5": 7.411678575039498,
+      "p10": 8.377494796026443,
+      "p50": 13.451986586955012,
+      "p90": 27.404529608907637
+    },
+    "headroom_threshold_counts": {
+      "hours_headroom_lt1_MW": {
+        "count": 0,
+        "fraction": 0.0,
+        "pct": 0.0
+      },
+      "hours_headroom_lt2_MW": {
+        "count": 0,
+        "fraction": 0.0,
+        "pct": 0.0
+      },
+      "hours_headroom_lt5_MW": {
+        "count": 4,
+        "fraction": 0.00045662100456621003,
+        "pct": 0.05
+      },
+      "hours_headroom_lt10_MW": {
+        "count": 1730,
+        "fraction": 0.19748858447488585,
+        "pct": 19.75
+      }
+    },
+    "headroom_acceptance_limits": {
+      "pct_lt_1MW": {
+        "target": 0.003,
+        "actual": 0.0,
+        "pass": true
+      },
+      "pct_lt_2MW": {
+        "target": 0.02,
+        "actual": 0.0,
+        "pass": true
+      },
+      "pct_lt_5MW": {
+        "target": 0.08,
+        "actual": 0.00045662100456621003,
+        "pass": true
+      }
+    },
+    "incremental_sensitivity": {
+      "deltas_mw": [
+        2,
+        5,
+        10,
+        15
+      ],
+      "hours_bind": {
+        "2": 0,
+        "5": 4,
+        "10": 1730,
+        "15": 5036
+      },
+      "pct_bind": {
+        "2": 0.0,
+        "5": 0.00045662100456621003,
+        "10": 0.19748858447488585,
+        "15": 0.5748858447488584
+      }
+    },
+    "emi_template_used": true,
+    "jan_validation": {
+      "weekend_weekday_ratio": 0.9679171858622919,
+      "diurnal_range_MW": 2.4495343275024126
+    }
+  },
+  "summary_statistics": {
+    "total_hours": 8760,
+    "baseline_import_MW": {
+      "min": 5.339548037612129,
+      "mean": 17.299419295067054,
+      "max": 28.552041243286833
+    },
+    "headroom_MW": {
+      "min": 4.697958756713167,
+      "mean": 16.34879988301514,
+      "max": 28.860451962387867,
+      "p1": 5.9580430508423765,
+      "p5": 7.411678575039498,
+      "p10": 8.377494796026443,
+      "p50": 13.451986586955012,
+      "p90": 27.404529608907637
+    }
+  }
+}

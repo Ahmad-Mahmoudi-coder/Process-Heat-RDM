@@ -1,17 +1,17 @@
-# Default: normalise to LF in the repo
+# Default: treat as text and normalise line endings to LF in the repository
 * text=auto eol=lf
 
 # Windows scripts
 *.bat text eol=crlf
 *.ps1 text eol=crlf
 
-# Source + docs + configs
-*.py  text eol=lf
-*.md  text eol=lf
-*.toml text eol=lf
+# Data/config
 *.csv text eol=lf
+*.toml text eol=lf
+*.md  text eol=lf
+*.py  text eol=lf
 
-# Binary
+# Binary files (never touch line endings)
 *.png binary
 *.jpg binary
 *.jpeg binary

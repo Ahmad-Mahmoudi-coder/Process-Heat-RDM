@@ -112,30 +112,28 @@ def main():
         run_dir
     )
     
-    # Step 5: Run regional electricity PoC (if input files exist)
-    baseline_path = Path('Input/gxp_baseline_import_hourly_2020.csv')
-    capacity_path = Path('Input/gxp_headroom_hourly_2020.csv')
+    # Step 5: Run regional electricity PoC (if GXP file exists)
+    gxp_csv_path = Path('modules/edendale_gxp/outputs_latest/gxp_hourly_2020.csv')
     incremental_path = run_dir / 'site_electricity_incremental_2020.csv'
-    tariff_path = Path('Input/gxp_tariff_hourly_2020.csv')
     
-    if all(p.exists() for p in [baseline_path, capacity_path, tariff_path]):
+    if gxp_csv_path.exists():
+        regional_output = str(run_dir / 'regional_electricity_signals_2020.csv')
+        cmd = ['python', '-m', 'src.regional_electricity_poc',
+               '--epoch', '2020',
+               '--gxp-csv', str(gxp_csv_path),
+               '--out', regional_output]
+        
+        # Add incremental if it exists, otherwise will default to zero series
         if incremental_path.exists():
-            regional_output = str(run_dir / 'regional_electricity_signals_2020.csv')
-            run_command(
-                ['python', '-m', 'src.regional_electricity_poc',
-                 '--epoch', '2020',
-                 '--baseline', str(baseline_path),
-                 '--capacity', str(capacity_path),
-                 '--incremental', str(incremental_path),
-                 '--tariff', str(tariff_path),
-                 '--out', regional_output],
-                "Step 4: Compute regional electricity signals (GXP capacity PoC)",
-                run_dir
-            )
-        else:
-            print(f"[SKIP] Regional electricity PoC: {incremental_path} not found")
+            cmd.extend(['--incremental-csv', str(incremental_path)])
+        
+        run_command(
+            cmd,
+            "Step 4: Compute regional electricity signals (GXP capacity PoC)",
+            run_dir
+        )
     else:
-        print("[SKIP] Regional electricity PoC: Required input files not found")
+        print(f"[SKIP] Regional electricity PoC: {gxp_csv_path} not found")
     
     # Verify all required figures exist
     demandpack_plots = [

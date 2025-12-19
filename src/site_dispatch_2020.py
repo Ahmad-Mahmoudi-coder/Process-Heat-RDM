@@ -1018,7 +1018,7 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     
     # Add annual diagnostics for optimal mode (before creating TOTAL row)
     total_dict_base = {}
-        if 'reserve_shortfall_MW' in dispatch_long.columns:
+    if 'reserve_shortfall_MW' in dispatch_long.columns:
         # Compute diagnostics across all hours (not per unit)
         # Parse timestamp_utc if needed for grouping
         dispatch_long_for_diag = dispatch_long.copy()

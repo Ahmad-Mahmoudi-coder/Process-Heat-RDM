@@ -1,15 +1,13 @@
-# Default: treat as text and normalise line endings to LF in the repository
-* text=auto eol=lf
+# Python + text config files
+*.py    text eol=lf
+*.toml  text eol=lf
+*.md    text eol=lf
 
-# Windows scripts
-*.bat text eol=crlf
-*.ps1 text eol=crlf
+# Data files (treat as text; keep LF for reproducibility)
+*.csv   text eol=lf
 
-# Data/config
-*.csv text eol=lf
-*.toml text eol=lf
-*.md  text eol=lf
-*.py  text eol=lf
+# PowerShell scripts should remain CRLF on Windows (optional)
+*.ps1   text eol=crlf
 
 # Binary files (never touch line endings)
 *.png binary

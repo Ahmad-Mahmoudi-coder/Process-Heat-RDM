@@ -1,0 +1,2 @@
+shape_id	description	seasonal_file	weekday_file	daily_file	notes
+edendale_heat_v1					"""Single-component synthetic heat demand"",factors/seasonal_factors.csv,factors/weekday_factors.csv,factors/daily_factors.csv,""PoC single-shape"""

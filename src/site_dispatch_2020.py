@@ -5,18 +5,24 @@ Allocates hourly heat demand across site utilities (coal boilers) using
 proportional capacity dispatch and computes fuel consumption and CO2 emissions.
 """
 
+# Bootstrap: allow `python .\src\script.py` (adds repo root to sys.path)
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import pandas as pd
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
-from pathlib import Path
-from typing import Tuple, Optional
-import sys
+from typing import Tuple, Optional, Dict
 
+from src.path_utils import repo_root, resolve_path, resolve_cfg_path, input_root
 from src.load_signals import load_signals_config, get_signals_for_epoch
 from src.time_utils import parse_any_timestamp, to_iso_z
-from typing import Dict
 
 
 def load_hourly_demand(path: str) -> pd.DataFrame:
@@ -59,7 +65,7 @@ def load_utilities(path: str) -> pd.DataFrame:
     """
     Load site utilities CSV and validate required fields.
     
-    Required columns: unit_id, site_id, tech_type, fuel, status_2020, max_heat_MW,
+    Required columns: unit_id, site_id, tech_type, fuel, status_2020 (or status as alias), max_heat_MW,
                      min_load_frac, efficiency_th, availability_factor, co2_factor_t_per_MWh_fuel
     
     Optional columns (defaults if missing):
@@ -80,8 +86,20 @@ def load_utilities(path: str) -> pd.DataFrame:
     """
     df = pd.read_csv(path)
     
+    # Define status column name
+    status_col = "status_2020"
+    
+    # Handle status_2020 / status alias
+    if status_col not in df.columns:
+        if "status" in df.columns:
+            df[status_col] = df["status"]
+            print(f"[WARN] Column 'status_2020' not found, using 'status' as alias in {path}")
+        else:
+            # Both missing - will be caught in required_cols check below
+            pass
+    
     # Required columns
-    required_cols = ['unit_id', 'site_id', 'tech_type', 'fuel', 'status_2020', 
+    required_cols = ['unit_id', 'site_id', 'tech_type', 'fuel', status_col, 
                      'max_heat_MW', 'min_load_frac', 'efficiency_th', 
                      'availability_factor', 'co2_factor_t_per_MWh_fuel']
     missing_cols = [col for col in required_cols if col not in df.columns]
@@ -94,9 +112,9 @@ def load_utilities(path: str) -> pd.DataFrame:
         raise ValueError(f"Duplicate unit_id values in {path}: {list(duplicates)}")
     
     # Check all status_2020 == "existing"
-    if not (df['status_2020'] == 'existing').all():
-        invalid = df[df['status_2020'] != 'existing']
-        raise ValueError(f"Found units with status_2020 != 'existing' in {path}: {invalid[['unit_id', 'status_2020']].to_dict('records')}")
+    if not (df[status_col] == 'existing').all():
+        invalid = df[df[status_col] != 'existing']
+        raise ValueError(f"Found units with {status_col} != 'existing' in {path}: {invalid[['unit_id', status_col]].to_dict('records')}")
     
     # Check max_heat_MW > 0
     if not (df['max_heat_MW'] > 0).all():
@@ -1456,7 +1474,10 @@ def plot_unit_utilisation_duration(dispatch_long_path: str, output_path: str,
     df = df.sort_values('timestamp_utc').reset_index(drop=True)
     
     # Load utilities to get actual max capacity
-    util_df = pd.read_csv(utilities_csv)
+    util_csv_resolved = resolve_path(utilities_csv)
+    if not util_csv_resolved.exists():
+        raise FileNotFoundError(f"Utilities CSV file not found: {util_csv_resolved} (resolved from {utilities_csv})")
+    util_df = pd.read_csv(util_csv_resolved)
     # Create capacity map: max_heat_MW * availability_factor
     capacity_map = {}
     for _, util_row in util_df.iterrows():
@@ -1511,8 +1532,10 @@ def main():
     parser = argparse.ArgumentParser(description='Compute 2020 baseline site utility dispatch')
     parser.add_argument('--demand-csv', default='Output/hourly_heat_demand_2020.csv',
                        help='Path to hourly demand CSV')
-    parser.add_argument('--utilities-csv', default='Input/site_utilities_2020.csv',
-                       help='Path to site utilities CSV')
+    parser.add_argument('--utilities-csv', default=None,
+                       help='Path to site utilities CSV (default: auto-discover from Input/site/utilities/)')
+    parser.add_argument('--demandpack-config', default=None,
+                       help='Path to demandpack config (optional, used to check for utilities path)')
     parser.add_argument('--mode', choices=['proportional', 'optimal_subset'], default='proportional',
                        help='Dispatch mode: proportional (default) or optimal_subset')
     parser.add_argument('--commitment-block-hours', type=int, default=24,
@@ -1533,19 +1556,25 @@ def main():
                        help='Output path for wide-form dispatch CSV (auto-set based on mode)')
     parser.add_argument('--plot', action='store_true',
                        help='Generate dispatch plots')
-    parser.add_argument('--signals-config', default='Input/signals_config.toml',
-                       help='Path to signals config TOML file')
+    parser.add_argument('--signals-config', default=None,
+                       help='Path to signals config TOML file (default: Input/signals/signals_config.toml)')
     parser.add_argument('--epoch', default='2020',
                        help='Epoch label for signals (default: 2020)')
     parser.add_argument('--output-dir', type=str, default=None,
                        help='Output directory (default: Output/)')
     args = parser.parse_args()
     
+    # Resolve paths
+    ROOT = repo_root()
+    INPUT_DIR = input_root()
+    
+    print(f"Repository root: {ROOT}")
+    
     # Determine output directory
     if args.output_dir:
-        output_dir = Path(args.output_dir)
+        output_dir = resolve_path(args.output_dir)
     else:
-        output_dir = Path('Output')
+        output_dir = ROOT / 'Output'
     output_dir.mkdir(parents=True, exist_ok=True)
     figures_dir = output_dir / 'Figures'
     figures_dir.mkdir(parents=True, exist_ok=True)
@@ -1563,18 +1592,119 @@ def main():
         else:
             args.out_dispatch_wide = str(output_dir / 'site_dispatch_2020_wide_opt.csv')
     
-    # Load data
-    print(f"Loading hourly demand from {args.demand_csv}...")
-    demand_df = load_hourly_demand(args.demand_csv)
+    # Resolve input paths
+    demand_csv_resolved = resolve_path(args.demand_csv)
     
-    print(f"Loading utilities from {args.utilities_csv}...")
-    util_df = load_utilities(args.utilities_csv)
+    # Resolve utilities CSV with auto-discovery
+    if args.utilities_csv:
+        utilities_csv_resolved = resolve_path(args.utilities_csv)
+    else:
+        # Auto-discovery logic
+        utilities_csv_resolved = None
+        attempted_paths = []
+        
+        # Try a) From demandpack config (if provided and contains utilities path)
+        if args.demandpack_config:
+            try:
+                import tomllib
+            except ImportError:
+                try:
+                    import tomli as tomllib
+                except ImportError:
+                    tomllib = None
+            
+            if tomllib:
+                try:
+                    demandpack_config_path = resolve_path(args.demandpack_config)
+                    with open(demandpack_config_path, 'rb') as f:
+                        demandpack_config = tomllib.load(f)
+                    
+                    # Check for utilities path in config (could be in [general] or [site] section)
+                    utilities_path = None
+                    if 'general' in demandpack_config and 'utilities_csv' in demandpack_config['general']:
+                        utilities_path = demandpack_config['general']['utilities_csv']
+                    elif 'site' in demandpack_config and 'utilities_csv' in demandpack_config['site']:
+                        utilities_path = demandpack_config['site']['utilities_csv']
+                    
+                    if utilities_path:
+                        candidate = resolve_cfg_path(demandpack_config_path, utilities_path)
+                        attempted_paths.append(f"  a) From demandpack config: {candidate}")
+                        if candidate.exists():
+                            utilities_csv_resolved = candidate
+                except Exception as e:
+                    # Silently fail - config might not have utilities path
+                    pass
+        
+        # Try b) <input_dir>/site/utilities/site_utilities_2020.csv
+        if utilities_csv_resolved is None:
+            candidate = INPUT_DIR / 'site' / 'utilities' / 'site_utilities_2020.csv'
+            attempted_paths.append(f"  b) Default location: {candidate}")
+            if candidate.exists():
+                utilities_csv_resolved = candidate
+        
+        # Try c) Search <input_dir>/site/utilities/ for *utilities*2020*.csv
+        if utilities_csv_resolved is None:
+            utilities_dir = INPUT_DIR / 'site' / 'utilities'
+            if utilities_dir.exists():
+                matches = sorted(utilities_dir.glob('*utilities*2020*.csv'))
+                attempted_paths.append(f"  c) Searched in: {utilities_dir}")
+                if len(matches) == 1:
+                    utilities_csv_resolved = matches[0]
+                    attempted_paths.append(f"     Found: {utilities_csv_resolved}")
+                elif len(matches) > 1:
+                    # Multiple matches - list them
+                    print(f"[ERROR] Multiple utilities CSV files found in {utilities_dir}:")
+                    print("Please specify one using --utilities-csv")
+                    print()
+                    for i, match in enumerate(matches, 1):
+                        print(f"  {i}. {match.name} ({match})")
+                    print()
+                    print(f"Example: --utilities-csv {matches[0].relative_to(ROOT)}")
+                    sys.exit(1)
+        
+        # If still not found, show error with all attempted paths
+        if utilities_csv_resolved is None or not utilities_csv_resolved.exists():
+            print(f"[ERROR] Utilities CSV file not found. Attempted paths:")
+            for path_str in attempted_paths:
+                print(path_str)
+            print()
+            print("Please specify the utilities CSV using --utilities-csv")
+            print(f"Example: --utilities-csv {INPUT_DIR / 'site' / 'utilities' / 'site_utilities_2020.csv'}")
+            sys.exit(1)
+        else:
+            # Successfully auto-discovered
+            print(f"[OK] Auto-discovered utilities CSV: {utilities_csv_resolved}")
+    
+    # Resolve signals config (use default if not provided)
+    if args.signals_config:
+        signals_config_resolved = resolve_path(args.signals_config)
+    else:
+        signals_config_resolved = INPUT_DIR / 'signals' / 'signals_config.toml'
+    
+    # Validation
+    if not demand_csv_resolved.exists():
+        print(f"[ERROR] Demand CSV file not found: {demand_csv_resolved}")
+        sys.exit(1)
+    if not utilities_csv_resolved.exists():
+        print(f"[ERROR] Utilities CSV file not found: {utilities_csv_resolved}")
+        print("Please specify the utilities CSV using --utilities-csv")
+        sys.exit(1)
+    if not signals_config_resolved.exists():
+        print(f"[ERROR] Signals config file not found: {signals_config_resolved}")
+        sys.exit(1)
+    
+    # Load data
+    print(f"Loading hourly demand from {demand_csv_resolved}...")
+    demand_df = load_hourly_demand(str(demand_csv_resolved))
+    
+    print(f"Loading utilities from {utilities_csv_resolved}...")
+    util_df = load_utilities(str(utilities_csv_resolved))
     
     print(f"Found {len(util_df)} utilities with total capacity {util_df['max_heat_MW'].sum():.2f} MW")
     
     # Load signals for the epoch
-    print(f"Loading signals for epoch '{args.epoch}' from {args.signals_config}...")
-    signals_config = load_signals_config(args.signals_config)
+    print(f"Loading signals for epoch '{args.epoch}' from {signals_config_resolved}...")
+    signals_config = load_signals_config(str(signals_config_resolved))
     signals = get_signals_for_epoch(signals_config, args.epoch)
     
     # Compute dispatch based on mode
@@ -1816,7 +1946,7 @@ def main():
                 # Utilisation duration plot
                 plot_path = figures_dir / 'heat_2020_unit_utilisation_duration_opt.png'
                 try:
-                    plot_unit_utilisation_duration(args.out_dispatch_long, str(plot_path), args.utilities_csv)
+                    plot_unit_utilisation_duration(args.out_dispatch_long, str(plot_path), str(utilities_csv_resolved))
                 except Exception as e:
                     print(f"[FAIL] Utilisation duration plot: {e}")
                     raise

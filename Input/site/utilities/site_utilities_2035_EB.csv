@@ -1,0 +1,9 @@
+unit_id,site_id,tech_type,fuel,commission_year,status,max_heat_MW,min_load_frac,efficiency_th,availability_factor,fixed_on_cost_nzd_per_h,startup_cost_nzd,min_up_time_h,min_down_time_h,co2_factor_t_per_MWh_fuel,notes
+CB1,11_031,coal_boiler,lignite,1994,retired,25,0.35,0.78,0,5,2500,8,8,0.25,"""John Thompson watertube. Originally ~32 MW; treated as 25 MW in RHDD. Slightly lower efficiency to represent age/derating."""
+CB2,11_031,coal_boiler,lignite,1996,retired,25,0.35,0.8,0,5,2500,8,8,0.25,"""Electro Kessel Cowen John Thompson watertube. Originally ~32 MW; modelled as 25 MW in RHDD."""
+CB3,11_031,coal_boiler,lignite,2003,retired,40,0.3,0.86,0,5,2500,8,8,0.25,"""John Thompson watertube installed 2003. Originally ~35 MW; modelled as 40 MW consistent with RHDD aggregate."""
+CB4,11_031,coal_boiler,lignite,2009,retired,40,0.3,0.88,1,5,2500,8,8,0.25,"""Babcock Tower Pack installed 2009. Originally ~38 MW; modelled as 40 MW per RHDD. Likely to be kept longest in future scenarios."""
+EB1,11_031,electrode_boiler,electricity,2025,existing,20,0.05,0.99,0.98,2,500,1,1,0,"""~20 MW electrode boiler commissioned 2024; replaces CB1 in PoC pathway. Electricity emissions handled outside site module in later coupling."""
+EB2,11_031,electrode_boiler,electricity,2027,existing,30,0.05,0.99,0.98,2,500,1,1,0,"""EB2 commissioned ~2027 in PoC pathway (placeholder params)."""
+EB3,11_031,electrode_boiler,electricity,2027,existing,30,0.05,0.99,0.98,2,500,1,1,0,"""EB3 commissioned ~2027 in PoC pathway (placeholder params)."""
+EB4,11_031,electrode_boiler,electricity,2035,existing,40,0.05,0.99,0.98,2,500,1,1,0,"""EB4 commissioned ~2035 in PoC pathway (placeholder params)."""

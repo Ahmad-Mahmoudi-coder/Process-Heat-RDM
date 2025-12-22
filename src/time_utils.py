@@ -207,3 +207,6 @@ def validate_time_alignment(demand_df: pd.DataFrame, gxp_df: pd.DataFrame) -> No
                 f"gxp_df={gxp_ts.iloc[first_mismatch_idx]}"
             )
 
+
+
+

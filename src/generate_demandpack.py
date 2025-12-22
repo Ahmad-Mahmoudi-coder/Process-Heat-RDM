@@ -5,11 +5,17 @@ Generates synthetic hourly heat demand profiles for 2020 anchored to annual ener
 targets with realistic seasonal, weekday, and hourly patterns.
 """
 
+# Bootstrap: allow `python .\src\script.py` (adds repo root to sys.path)
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import pandas as pd
 import numpy as np
-from pathlib import Path
 from typing import Dict, Any, Optional
-import sys
 
 try:
     import tomllib
@@ -19,6 +25,7 @@ except ImportError:
     except ImportError:
         raise ImportError("Need tomllib (Python 3.11+) or tomli package")
 
+from src.path_utils import repo_root, resolve_path, resolve_cfg_path, input_root
 from src.time_utils import build_hourly_utc_index, to_iso_z, parse_any_timestamp
 
 
@@ -28,7 +35,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         return tomllib.load(f)
 
 
-def load_annual_anchor(config: Dict[str, Any]) -> float:
+def load_annual_anchor(config: Dict[str, Any], config_path: Path) -> float:
     """
     Load annual heat target from site file.
     Returns annual_heat_GWh for the target site and year.
@@ -41,7 +48,12 @@ def load_annual_anchor(config: Dict[str, Any]) -> float:
     year_col = config['columns']['year']
     annual_heat_col = config['columns']['annual_heat_gwh']
     
-    df = pd.read_csv(site_file)
+    # Resolve site_file path relative to config file
+    site_file_path = resolve_cfg_path(config_path, site_file)
+    if not site_file_path.exists():
+        raise FileNotFoundError(f"Site file not found: {site_file_path} (resolved from {site_file})")
+    
+    df = pd.read_csv(site_file_path)
     
     # Filter for target site and year
     mask = (df[site_id_col] == target_site_id) & (df[year_col] == target_year)
@@ -55,7 +67,7 @@ def load_annual_anchor(config: Dict[str, Any]) -> float:
 # build_hourly_index is now replaced by build_hourly_utc_index from time_utils
 
 
-def load_seasonal_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) -> pd.Series:
+def load_seasonal_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex, config_path: Path) -> pd.Series:
     """
     Load seasonal factors and interpolate to hourly resolution.
     
@@ -63,7 +75,10 @@ def load_seasonal_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex
     to daily values, applies smoothing, then maps to hourly.
     """
     seasonality = config['seasonality']
-    df = pd.read_csv(seasonality['file'])
+    season_file_path = resolve_cfg_path(config_path, seasonality['file'])
+    if not season_file_path.exists():
+        raise FileNotFoundError(f"Seasonal factors file not found: {season_file_path} (resolved from {seasonality['file']})")
+    df = pd.read_csv(season_file_path)
     
     month_col = seasonality['month_col']
     factor_col = seasonality['factor_col']
@@ -115,10 +130,13 @@ def load_seasonal_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex
     return pd.Series(hourly_factors, index=hourly_index, name='seasonal_factor')
 
 
-def load_weekday_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) -> pd.Series:
+def load_weekday_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex, config_path: Path) -> pd.Series:
     """Load weekday factors and map to hourly timestamps."""
     weekday = config['weekday']
-    df = pd.read_csv(weekday['file'])
+    weekday_file_path = resolve_cfg_path(config_path, weekday['file'])
+    if not weekday_file_path.exists():
+        raise FileNotFoundError(f"Weekday factors file not found: {weekday_file_path} (resolved from {weekday['file']})")
+    df = pd.read_csv(weekday_file_path)
     
     day_col = weekday['day_col']
     factor_col = weekday['factor_col']
@@ -133,10 +151,13 @@ def load_weekday_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex)
     return pd.Series(factors, index=hourly_index, name='weekday_factor')
 
 
-def load_hourly_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) -> pd.Series:
+def load_hourly_factors(config: Dict[str, Any], hourly_index: pd.DatetimeIndex, config_path: Path) -> pd.Series:
     """Load hour-of-day factors and map to hourly timestamps."""
     daily = config['daily']
-    df = pd.read_csv(daily['file'])
+    daily_file_path = resolve_cfg_path(config_path, daily['file'])
+    if not daily_file_path.exists():
+        raise FileNotFoundError(f"Daily factors file not found: {daily_file_path} (resolved from {daily['file']})")
+    df = pd.read_csv(daily_file_path)
     
     hour_col = daily['hour_col']
     factor_col = daily['factor_col']
@@ -217,7 +238,8 @@ def generate_hour_noise(config: Dict[str, Any], hourly_index: pd.DatetimeIndex) 
 def load_and_resample_temperature(
     config: Dict[str, Any], 
     hourly_index: pd.DatetimeIndex,
-    target_site_id: str
+    target_site_id: str,
+    config_path: Path
 ) -> Optional[pd.Series]:
     """
     Load temperature series and resample to hourly UTC index.
@@ -230,6 +252,7 @@ def load_and_resample_temperature(
         config: Configuration dict (may contain temperature settings)
         hourly_index: Target hourly UTC DatetimeIndex
         target_site_id: Site ID to filter temperature data
+        config_path: Path to config file for resolving relative paths
         
     Returns:
         Series with temperature values aligned to hourly_index, or None if not configured
@@ -243,13 +266,18 @@ def load_and_resample_temperature(
         return None
     
     temp_file = temp_config.get('file')
-    if not temp_file or not Path(temp_file).exists():
-        print(f"[SKIP] Temperature file not found: {temp_file}")
+    if not temp_file:
+        return None
+    
+    # Resolve temperature file path
+    temp_file_path = resolve_cfg_path(config_path, temp_file)
+    if not temp_file_path.exists():
+        print(f"[SKIP] Temperature file not found: {temp_file_path} (resolved from {temp_file})")
         return None
     
     # Load temperature CSV
-    print(f"Loading temperature series from {temp_file}...")
-    temp_df = pd.read_csv(temp_file)
+    print(f"Loading temperature series from {temp_file_path}...")
+    temp_df = pd.read_csv(temp_file_path)
     
     # Detect timestamp column (support various names)
     timestamp_col = None
@@ -397,10 +425,15 @@ def generate_demandpack(config_path: str, cap_peak_mw_override: float = None) ->
     
     Returns DataFrame with timestamp, site_id, heat_demand_MW, and all factors.
     """
-    config = load_config(config_path)
+    # Resolve config path
+    config_path_resolved = resolve_path(config_path)
+    if not config_path_resolved.exists():
+        raise FileNotFoundError(f"Config file not found: {config_path_resolved} (resolved from {config_path})")
+    
+    config = load_config(str(config_path_resolved))
     
     # Load annual anchor
-    annual_heat_GWh = load_annual_anchor(config)
+    annual_heat_GWh = load_annual_anchor(config, config_path_resolved)
     target_year = config['general']['target_year']
     target_site_id = config['general']['target_site_id']
     
@@ -412,14 +445,14 @@ def generate_demandpack(config_path: str, cap_peak_mw_override: float = None) ->
     avg_MW = annual_heat_GWh * 1000.0 / hours_per_year
     
     # Load and compute all factors
-    seasonal = load_seasonal_factors(config, hourly_index)
-    weekday = load_weekday_factors(config, hourly_index)
-    hourly = load_hourly_factors(config, hourly_index)
+    seasonal = load_seasonal_factors(config, hourly_index, config_path_resolved)
+    weekday = load_weekday_factors(config, hourly_index, config_path_resolved)
+    hourly = load_hourly_factors(config, hourly_index, config_path_resolved)
     weekly = generate_weekly_drift(config, hourly_index)
     noise = generate_hour_noise(config, hourly_index)
     
     # Load and resample temperature if configured
-    temperature = load_and_resample_temperature(config, hourly_index, target_site_id)
+    temperature = load_and_resample_temperature(config, hourly_index, target_site_id, config_path_resolved)
     
     # Combine factors
     combined_factors = seasonal * weekday * hourly * weekly * noise
@@ -492,37 +525,85 @@ def generate_demandpack(config_path: str, cap_peak_mw_override: float = None) ->
     return result
 
 
+def find_demandpack_configs(configs_dir: Path) -> list[Path]:
+    """Find all demandpack*.toml files in the configs directory."""
+    if not configs_dir.exists():
+        return []
+    return sorted(configs_dir.glob('demandpack*.toml'))
+
+
 def main():
     """CLI entrypoint."""
     import argparse
     
     parser = argparse.ArgumentParser(description='Generate DemandPack hourly heat demand')
-    parser.add_argument('--config', default='Input/demandpack_config.toml',
-                       help='Path to config TOML file')
+    parser.add_argument('--config', default=None,
+                       help='Path to config TOML file (default: auto-discover from Input/configs)')
     parser.add_argument('--cap-peak-mw', type=float, default=None,
                        help='Peak capacity cap (MW). If not specified, uses config value or no cap.')
     parser.add_argument('--output-dir', type=str, default=None,
                        help='Output directory (default: Output/ or from config)')
     args = parser.parse_args()
     
+    # Resolve paths
+    ROOT = repo_root()
+    INPUT_DIR = input_root()
+    
+    # Auto-discover config if not provided
+    if args.config:
+        config_path_resolved = resolve_path(args.config)
+    else:
+        # Auto-discover from Input/configs
+        configs_dir = INPUT_DIR / 'configs'
+        configs = find_demandpack_configs(configs_dir)
+        if not configs:
+            print(f"[ERROR] No demandpack*.toml files found in {configs_dir}")
+            print("Please specify a config using --config")
+            sys.exit(1)
+        elif len(configs) == 1:
+            config_path_resolved = configs[0]
+            print(f"[OK] Auto-discovered demandpack config: {config_path_resolved}")
+        else:
+            # Multiple configs found - list them and exit
+            print(f"[ERROR] Multiple demandpack configs found in {configs_dir}:")
+            print("Please specify one using --config")
+            print()
+            for i, cfg in enumerate(configs, 1):
+                print(f"  {i}. {cfg.name} ({cfg})")
+            print()
+            print(f"Example: --config {configs[0].relative_to(ROOT)}")
+            sys.exit(1)
+    
+    print(f"Repository root: {ROOT}")
+    print(f"Config path: {config_path_resolved}")
+    
+    if not INPUT_DIR.exists():
+        print(f"[ERROR] Input directory not found: {INPUT_DIR}")
+        sys.exit(1)
+    
+    if not config_path_resolved.exists():
+        print(f"[ERROR] Config file not found: {config_path_resolved}")
+        sys.exit(1)
+    
     # Determine output directory
     if args.output_dir:
-        output_path = Path(args.output_dir)
+        output_path = resolve_path(args.output_dir)
     else:
-        output_path = Path('Output')
+        output_path = ROOT / 'Output'
     output_path.mkdir(parents=True, exist_ok=True)
     
     # Generate demandpack
     print("Generating DemandPack...")
-    df = generate_demandpack(args.config, cap_peak_mw_override=args.cap_peak_mw)
+    df = generate_demandpack(str(config_path_resolved), cap_peak_mw_override=args.cap_peak_mw)
     
     # Save CSV (timestamp_utc is already in ISO Z format as string)
-    config = load_config(args.config)
+    config = load_config(str(config_path_resolved))
     # Use output_dir if provided, otherwise use config value
     if args.output_dir:
         output_csv = output_path / Path(config['general']['output_csv']).name
     else:
-        output_csv = config['general']['output_csv']
+        # Resolve output_csv from config relative to repo root
+        output_csv = resolve_path(config['general']['output_csv'])
     df.to_csv(output_csv, index=False)
     print(f"[OK] Saved output to {output_csv}")
     

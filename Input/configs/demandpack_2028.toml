@@ -1,0 +1,43 @@
+[general]
+site_file = "Input/site/site_annual.csv"
+target_site_id = "11_031"
+target_year = 2028
+hours_per_year = 8784
+output_csv = "Output/hourly_heat_demand_2028.csv"
+
+[columns]
+site_id = "site_id"
+year = "calendar_year"
+annual_heat_gwh = "annual_heat_GWh"
+
+[seasonality]
+file = "Input/factors/seasonal_factors.csv"
+month_col = "month"
+factor_col = "scaling_factor"
+mode = "monthly_anchors"
+anchor_day = 15
+interpolation = "time"
+smooth_days = 21
+wrap_year = true
+
+[weekday]
+file = "Input/factors/weekday_factors.csv"
+day_col = "day_of_week"
+factor_col = "scaling_factor"
+
+[daily]
+file = "Input/factors/daily_factors.csv"
+hour_col = "hour"
+factor_col = "hourly_factor"
+
+[weekly_drift]
+enabled = true
+sigma = 0.03
+rho = 0.9
+min = 0.9
+max = 1.1
+
+[noise]
+enabled = true
+hour_sigma = 0.01
+seed = 42

@@ -1,0 +1,9 @@
+scenario_id,epoch_id,annual_heat_multiplier,notes
+fixed,2020,1,"""Baseline"""
+fixed,2025,1,"""No growth"""
+fixed,2028,1,"""No growth"""
+fixed,2035,1,"""No growth"""
+growth,2020,1,"""Baseline"""
+growth,2025,1.05,"""+5%"""
+growth,2028,1.1,"""+10%"""
+growth,2035,1.15,"""+15%"""

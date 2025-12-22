@@ -1,0 +1,5 @@
+epoch_id	calendar_year	hours_per_year	notes
+2020	2020	8784	"""Leap year baseline"""
+2025	2025	8760	"""Non-leap"""
+2028	2028	8784	"""Leap year"""
+2035	2035	8760	"""Non-leap"""

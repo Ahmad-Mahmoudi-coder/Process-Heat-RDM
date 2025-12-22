@@ -12,6 +12,8 @@ from datetime import datetime
 from typing import Optional
 import os
 
+from src.path_utils import repo_root
+
 
 def generate_run_id() -> str:
     """
@@ -38,7 +40,9 @@ def get_run_dir(run_id: Optional[str] = None) -> Path:
     if run_id is None:
         run_id = generate_run_id()
     
-    return Path('Output') / 'runs' / run_id
+    ROOT = repo_root()
+    OUTPUT_DIR = ROOT / 'Output'
+    return OUTPUT_DIR / 'runs' / run_id
 
 
 def setup_run_dir(run_id: Optional[str] = None) -> Path:
@@ -70,11 +74,13 @@ def update_latest_symlink(run_id: str) -> None:
     Args:
         run_id: Run ID to set as latest
     """
-    latest_dir = Path('Output') / 'latest'
+    ROOT = repo_root()
+    OUTPUT_DIR = ROOT / 'Output'
+    latest_dir = OUTPUT_DIR / 'latest'
     latest_dir.mkdir(parents=True, exist_ok=True)
     
     # Create text file with run_id
-    latest_run_file = Path('Output') / 'latest_run.txt'
+    latest_run_file = OUTPUT_DIR / 'latest_run.txt'
     with open(latest_run_file, 'w') as f:
         f.write(run_id)
     
@@ -139,8 +145,10 @@ def archive_latest(run_id: Optional[str] = None) -> None:
     if run_id is None:
         run_id = generate_run_id()
     
-    latest_dir = Path('Output') / 'latest'
-    archive_dir = Path('Output') / '_archive' / run_id
+    ROOT = repo_root()
+    OUTPUT_DIR = ROOT / 'Output'
+    latest_dir = OUTPUT_DIR / 'latest'
+    archive_dir = OUTPUT_DIR / '_archive' / run_id
     
     if not latest_dir.exists():
         print(f"[SKIP] No Output/latest/ to archive")
@@ -195,7 +203,9 @@ def clean_latest() -> None:
     
     Handles Windows file locking gracefully.
     """
-    latest_dir = Path('Output') / 'latest'
+    ROOT = repo_root()
+    OUTPUT_DIR = ROOT / 'Output'
+    latest_dir = OUTPUT_DIR / 'latest'
     
     if not latest_dir.exists():
         print("[SKIP] Output/latest/ does not exist")
@@ -238,9 +248,14 @@ def get_latest_run_id() -> Optional[str]:
     Returns:
         Run ID string, or None if not found
     """
-    latest_run_file = Path('Output') / 'latest_run.txt'
+    ROOT = repo_root()
+    OUTPUT_DIR = ROOT / 'Output'
+    latest_run_file = OUTPUT_DIR / 'latest_run.txt'
     if latest_run_file.exists():
         with open(latest_run_file, 'r') as f:
             return f.read().strip()
     return None
+
+
+
 

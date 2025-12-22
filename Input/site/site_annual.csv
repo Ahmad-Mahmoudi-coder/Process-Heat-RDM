@@ -1,0 +1,5 @@
+site_id,epoch_id,calendar_year,annual_heat_GWh,annual_elec_GWh,daily_operation_hours,yearly_operation_days,note
+11_031,2020,2020,819,0,24,350,"""RHDD-anchored annual heat for Edendale utilities/PoC baseline"""
+11_031,2025,2025,819,0,24,350,"""Hold service demand fixed for PoC; pathway affects fuel/elec use endogenously"""
+11_031,2028,2028,819,0,24,350,"""Hold service demand fixed for PoC; pathway affects fuel/elec use endogenously"""
+11_031,2035,2035,819,0,24,350,"""Hold service demand fixed for PoC; pathway affects fuel/elec use endogenously"""

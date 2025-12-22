@@ -5,8 +5,15 @@ Loads price and emissions signals from TOML configuration for different epochs.
 Also provides helpers for loading and validating timestamp alignment with demand data.
 """
 
-from typing import Dict, Any, Optional
+# Bootstrap: allow `python .\src\script.py` (adds repo root to sys.path)
 import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from typing import Dict, Any, Optional
 import pandas as pd
 
 try:
@@ -17,20 +24,30 @@ except ImportError:
     except ImportError:
         raise ImportError("Need tomllib (Python 3.11+) or tomli package")
 
+from src.path_utils import repo_root, resolve_path, input_root
 from src.time_utils import parse_any_timestamp, build_hourly_utc_index, validate_time_alignment
 
 
-def load_signals_config(config_path: str = "Input/signals_config.toml") -> Dict[str, Any]:
+def load_signals_config(config_path: str = None) -> Dict[str, Any]:
     """
     Load and parse the SignalsPack-lite TOML file.
     
     Args:
-        config_path: Path to signals config TOML file
+        config_path: Path to signals config TOML file (default: Input/signals/signals_config.toml)
         
     Returns:
         The full parsed dict (top-level 'signals' table)
     """
-    with open(config_path, 'rb') as f:
+    # Use default if not provided
+    if config_path is None:
+        config_path = str(input_root() / 'signals' / 'signals_config.toml')
+    
+    # Resolve config path robustly
+    config_path_resolved = resolve_path(config_path)
+    if not config_path_resolved.exists():
+        raise FileNotFoundError(f"Signals config file not found: {config_path_resolved} (resolved from {config_path})")
+    
+    with open(config_path_resolved, 'rb') as f:
         config = tomllib.load(f)
     
     # TOML with [signals.general] and [signals.epochs."2020"] creates nested structure
@@ -111,7 +128,12 @@ def load_gxp_data(gxp_csv_path: str) -> pd.DataFrame:
     Returns:
         DataFrame with timestamp_utc parsed as UTC datetime64[ns, UTC]
     """
-    df = pd.read_csv(gxp_csv_path)
+    # Resolve path robustly
+    gxp_path_resolved = resolve_path(gxp_csv_path)
+    if not gxp_path_resolved.exists():
+        raise FileNotFoundError(f"GXP CSV file not found: {gxp_path_resolved} (resolved from {gxp_csv_path})")
+    
+    df = pd.read_csv(gxp_path_resolved)
     
     if 'timestamp_utc' not in df.columns:
         raise ValueError(f"GXP CSV file {gxp_csv_path} must have 'timestamp_utc' column")

@@ -1,2 +1,0 @@
-site_id,year,annual_heat_GWh,annual_elec_GWh,daily_operation_hours,yearly_operation_days,note
-11_031,2020,819,0,24,350,"""RHDD-anchored annual heat for Edendale utilities/PoC baseline"""

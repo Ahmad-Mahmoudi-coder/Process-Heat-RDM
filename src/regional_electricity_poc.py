@@ -11,11 +11,17 @@ Consumes SignalsPack GXP hourly data directly from Edendale_GXP submodule.
 Syntax check: python -m py_compile src/regional_electricity_poc.py
 """
 
+# Bootstrap: allow `python .\src\script.py` (adds repo root to sys.path)
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import pandas as pd
 import numpy as np
-from pathlib import Path
 import argparse
-import sys
 
 # Try to import PyPSA (optional)
 try:

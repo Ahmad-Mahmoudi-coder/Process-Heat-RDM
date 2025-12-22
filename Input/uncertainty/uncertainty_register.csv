@@ -1,0 +1,2 @@
+uncertainty_id	parameter	source_file	notes
+demand_growth	annual_heat_multiplier	uncertainty/demand_growth_scenarios.csv	"""Scalar on annual_heat_GWh before DemandPack"""

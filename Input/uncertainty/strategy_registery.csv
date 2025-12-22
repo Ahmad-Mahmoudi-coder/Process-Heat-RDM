@@ -1,0 +1,6 @@
+strategy_id,epoch_id,utilities_file,notes
+baseline_2020,2020,site/utilities/site_utilities_2020.csv,"""""""All coal"""""""
+pathway_2025,2025,site/utilities/site_utilities_2025.csv,"""""""EB1 replaces CB1"""""""
+pathway_2028,2028,site/utilities/site_utilities_2028.csv,"""""""EB2+EB3 replace CB2+CB3; CB4 remains"""""""
+electrify_last_2035,2035,site/utilities/site_utilities_2035_EB.csv,"""""""Add EB4 to retire last coal"""""""
+biomass_last_2035,2035,site/utilities/site_utilities_2035_BB.csv,"""""""Add BB1 to retire last coal"""""""

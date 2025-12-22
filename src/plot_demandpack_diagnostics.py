@@ -4,14 +4,20 @@ Diagnostic plotting for DemandPack output.
 Generates publication-ready figures for the synthetic hourly heat demand profile.
 """
 
+# Bootstrap: allow `python .\src\script.py` (adds repo root to sys.path)
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import pandas as pd
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
-from pathlib import Path
 from typing import Dict, Any
-import sys
 
 try:
     import tomllib
@@ -21,6 +27,8 @@ except ImportError:
     except ImportError:
         raise ImportError("Need tomllib (Python 3.11+) or tomli package")
 
+from src.path_utils import repo_root, resolve_path, resolve_cfg_path
+
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load and parse TOML configuration file."""
@@ -28,10 +36,13 @@ def load_config(config_path: str) -> Dict[str, Any]:
         return tomllib.load(f)
 
 
-def load_seasonal_labels(config: Dict[str, Any]) -> Dict[int, str]:
+def load_seasonal_labels(config: Dict[str, Any], config_path: Path) -> Dict[int, str]:
     """Load seasonal labels from seasonal_factors.csv."""
     seasonality = config['seasonality']
-    df = pd.read_csv(seasonality['file'])
+    season_file_path = resolve_cfg_path(config_path, seasonality['file'])
+    if not season_file_path.exists():
+        raise FileNotFoundError(f"Seasonal factors file not found: {season_file_path} (resolved from {seasonality['file']})")
+    df = pd.read_csv(season_file_path)
     
     month_col = seasonality['month_col']
     factor_col = seasonality['factor_col']
@@ -130,7 +141,7 @@ def plot_daily_envelope(df: pd.DataFrame, output_path: str):
 
 
 def plot_hourly_means_by_season(df: pd.DataFrame, config: Dict[str, Any], 
-                                 output_path: str):
+                                 output_path: str, config_path: Path):
     """Plot average hourly profile grouped by season."""
     # Ensure timestamp is datetime and extract hour
     if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
@@ -139,7 +150,7 @@ def plot_hourly_means_by_season(df: pd.DataFrame, config: Dict[str, Any],
         df['hour'] = df['timestamp'].dt.hour
     
     # Load seasonal labels
-    seasonal_labels = load_seasonal_labels(config)
+    seasonal_labels = load_seasonal_labels(config, config_path)
     
     # Map months to seasons
     df['month'] = df['timestamp'].dt.month
@@ -312,20 +323,35 @@ def main():
                        help='Output directory (default: Output/)')
     args = parser.parse_args()
     
+    # Resolve paths
+    ROOT = repo_root()
+    config_path_resolved = resolve_path(args.config)
+    data_path_resolved = resolve_path(args.data)
+    
+    print(f"Repository root: {ROOT}")
+    print(f"Config path: {config_path_resolved}")
+    
+    if not config_path_resolved.exists():
+        print(f"[ERROR] Config file not found: {config_path_resolved}")
+        sys.exit(1)
+    
     # Load config
-    config = load_config(args.config)
+    config = load_config(str(config_path_resolved))
     
     # Determine output directory
     if args.output_dir:
-        output_dir = Path(args.output_dir)
+        output_dir = resolve_path(args.output_dir)
     else:
-        output_dir = Path('Output')
+        output_dir = ROOT / 'Output'
     figures_dir = output_dir / 'Figures'
     figures_dir.mkdir(parents=True, exist_ok=True)
     
     # Load data
-    print(f"Loading data from {args.data}...")
-    df = pd.read_csv(args.data)
+    print(f"Loading data from {data_path_resolved}...")
+    if not data_path_resolved.exists():
+        print(f"[ERROR] Data file not found: {data_path_resolved}")
+        sys.exit(1)
+    df = pd.read_csv(data_path_resolved)
     # Support both timestamp and timestamp_utc for backward compatibility
     from src.time_utils import parse_any_timestamp
     if 'timestamp_utc' in df.columns:
@@ -355,7 +381,7 @@ def main():
     
     # 3. Average hourly profile by season
     output_path = str(figures_dir / 'heat_2020_hourly_means_by_season.png')
-    plot_hourly_means_by_season(df, config, output_path)
+    plot_hourly_means_by_season(df, config, output_path, config_path_resolved)
     generated_files.append(output_path)
     
     # 4. Monthly totals
@@ -421,8 +447,13 @@ if __name__ == '__main__':
             sys.argv = old_argv
     else:
         # Simple mode: load data and generate two plots
-        print(f"Loading data from {args.data}...")
-        df = pd.read_csv(args.data)
+        ROOT = repo_root()
+        data_path_resolved = resolve_path(args.data)
+        print(f"Loading data from {data_path_resolved}...")
+        if not data_path_resolved.exists():
+            print(f"[ERROR] Data file not found: {data_path_resolved}")
+            sys.exit(1)
+        df = pd.read_csv(data_path_resolved)
         # Support both timestamp and timestamp_utc for backward compatibility
         from src.time_utils import parse_any_timestamp
         if 'timestamp_utc' in df.columns:
@@ -434,10 +465,11 @@ if __name__ == '__main__':
         df = df.sort_values('timestamp').reset_index(drop=True)
         
         # Determine output directory
+        ROOT = repo_root()
         if args.output_dir:
-            output_dir = Path(args.output_dir)
+            output_dir = resolve_path(args.output_dir)
         else:
-            output_dir = Path('Output')
+            output_dir = ROOT / 'Output'
         figures_dir = output_dir / 'Figures'
         figures_dir.mkdir(parents=True, exist_ok=True)
         

@@ -28,6 +28,79 @@ from src.path_utils import repo_root, resolve_path, input_root
 from src.time_utils import parse_any_timestamp, build_hourly_utc_index, validate_time_alignment
 
 
+def map_eval_epoch_to_signals_epoch(eval_epoch: int, signals_config: Dict[str, Any] = None, 
+                                     input_dir: Path = None) -> int:
+    """
+    Map an evaluation epoch to the appropriate signals epoch.
+    
+    First tries to read Input/signals/epochs_registry.csv with columns eval_epoch, signals_epoch.
+    If the registry doesn't exist or eval_epoch isn't found, falls back to finding the closest
+    earlier available signals epoch from the signals config.
+    
+    Args:
+        eval_epoch: The evaluation epoch (e.g., 2025, 2028)
+        signals_config: Optional parsed signals config dict (if None, will load it)
+        input_dir: Optional input directory path (default: input_root())
+        
+    Returns:
+        The signals epoch to use (as int)
+        
+    Raises:
+        ValueError: If no signals epoch can be found
+    """
+    if input_dir is None:
+        input_dir = input_root()
+    
+    # Try to read epochs_registry.csv
+    registry_path = input_dir / 'signals' / 'epochs_registry.csv'
+    if registry_path.exists():
+        try:
+            registry_df = pd.read_csv(registry_path)
+            # Check if it has the expected columns
+            if 'eval_epoch' in registry_df.columns and 'signals_epoch' in registry_df.columns:
+                # Convert to int for comparison
+                registry_df['eval_epoch'] = registry_df['eval_epoch'].astype(int)
+                registry_df['signals_epoch'] = registry_df['signals_epoch'].astype(int)
+                
+                # Look up exact match
+                matches = registry_df[registry_df['eval_epoch'] == eval_epoch]
+                if len(matches) > 0:
+                    signals_epoch = int(matches.iloc[0]['signals_epoch'])
+                    if signals_epoch != eval_epoch:
+                        print(f"[WARN] Epoch mapping: eval_epoch {eval_epoch} -> signals_epoch {signals_epoch} (from registry)")
+                    return signals_epoch
+        except Exception:
+            # If reading registry fails (wrong format, missing columns, etc.), fall through to fallback logic
+            pass
+    
+    # Fallback: find closest earlier available signals epoch from config
+    if signals_config is None:
+        signals_config = load_signals_config()
+    
+    if 'epochs' not in signals_config:
+        raise ValueError("Signals config missing 'epochs' table")
+    
+    # Get available signals epochs (as integers)
+    available_epochs = [int(k) for k in signals_config['epochs'].keys() if k.isdigit()]
+    if not available_epochs:
+        raise ValueError("No numeric epoch keys found in signals config")
+    
+    available_epochs.sort(reverse=True)  # Sort descending
+    
+    # Find closest earlier epoch
+    for signals_epoch in available_epochs:
+        if signals_epoch <= eval_epoch:
+            if signals_epoch != eval_epoch:
+                print(f"[WARN] Epoch mapping: eval_epoch {eval_epoch} -> signals_epoch {signals_epoch} (closest earlier available)")
+            return signals_epoch
+    
+    # No earlier epoch found
+    raise ValueError(
+        f"No signals epoch found for eval_epoch {eval_epoch}. "
+        f"Available signals epochs: {sorted(available_epochs)}"
+    )
+
+
 def load_signals_config(config_path: str = None) -> Dict[str, Any]:
     """
     Load and parse the SignalsPack-lite TOML file.

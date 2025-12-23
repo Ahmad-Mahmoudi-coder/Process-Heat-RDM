@@ -70,7 +70,7 @@ def resolve_path(p: Union[str, Path], base: Path = None) -> Path:
     return (base / path).resolve()
 
 
-def resolve_cfg_path(cfg_path: Path, p: Union[str, Path]) -> Path:
+def resolve_cfg_path(cfg_path: Union[str, Path], p: Union[str, Path]) -> Path:
     """
     Resolve a path from a config file, with multiple fallback strategies.
     
@@ -84,12 +84,15 @@ def resolve_cfg_path(cfg_path: Path, p: Union[str, Path]) -> Path:
     This supports the new Input folder structure while maintaining backward compatibility.
     
     Args:
-        cfg_path: Path to the config file (used to determine base directory)
+        cfg_path: Path to the config file (used to determine base directory) - can be str or Path
         p: Path string or Path object from config
         
     Returns:
         Resolved absolute Path (may not exist if all fallbacks fail)
     """
+    # Normalize cfg_path to Path
+    cfg_path = Path(cfg_path).resolve() if isinstance(cfg_path, str) else cfg_path.resolve()
+    
     # Convert to Path if string
     path = Path(p) if isinstance(p, str) else p
     

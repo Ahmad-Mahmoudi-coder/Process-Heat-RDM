@@ -532,6 +532,16 @@ def find_demandpack_configs(configs_dir: Path) -> list[Path]:
     return sorted(configs_dir.glob('demandpack*.toml'))
 
 
+def infer_epoch_from_config_name(config_path: Path) -> int:
+    """Infer epoch from config filename (e.g., demandpack_2020.toml -> 2020)."""
+    import re
+    name = config_path.stem  # e.g., "demandpack_2020"
+    match = re.search(r'(\d{4})', name)
+    if match:
+        return int(match.group(1))
+    raise ValueError(f"Cannot infer epoch from config filename: {config_path.name}")
+
+
 def main():
     """CLI entrypoint."""
     import argparse
@@ -539,10 +549,16 @@ def main():
     parser = argparse.ArgumentParser(description='Generate DemandPack hourly heat demand')
     parser.add_argument('--config', default=None,
                        help='Path to config TOML file (default: auto-discover from Input/configs)')
+    parser.add_argument('--epoch', type=int, default=None,
+                       help='Epoch year (inferred from config name if not provided)')
     parser.add_argument('--cap-peak-mw', type=float, default=None,
                        help='Peak capacity cap (MW). If not specified, uses config value or no cap.')
     parser.add_argument('--output-dir', type=str, default=None,
-                       help='Output directory (default: Output/ or from config)')
+                       help='Output directory (deprecated: use --output-root and --run-id)')
+    parser.add_argument('--output-root', type=str, default=None,
+                       help='Output root directory (default: repo_root/Output)')
+    parser.add_argument('--run-id', type=str, default=None,
+                       help='Run ID (default: auto-generated from timestamp, epoch, config)')
     args = parser.parse_args()
     
     # Resolve paths
@@ -574,8 +590,22 @@ def main():
             print(f"Example: --config {configs[0].relative_to(ROOT)}")
             sys.exit(1)
     
+    # Infer epoch from config name if not provided
+    if args.epoch is None:
+        try:
+            epoch = infer_epoch_from_config_name(config_path_resolved)
+            print(f"[OK] Inferred epoch {epoch} from config filename")
+        except ValueError as e:
+            print(f"[WARN] {e}")
+            print("Please specify --epoch explicitly")
+            epoch = None
+    else:
+        epoch = args.epoch
+    
     print(f"Repository root: {ROOT}")
     print(f"Config path: {config_path_resolved}")
+    if epoch:
+        print(f"Epoch: {epoch}")
     
     if not INPUT_DIR.exists():
         print(f"[ERROR] Input directory not found: {INPUT_DIR}")
@@ -585,27 +615,63 @@ def main():
         print(f"[ERROR] Config file not found: {config_path_resolved}")
         sys.exit(1)
     
-    # Determine output directory
-    if args.output_dir:
-        output_path = resolve_path(args.output_dir)
+    # Determine output root
+    if args.output_root:
+        output_root = resolve_path(args.output_root)
     else:
-        output_path = ROOT / 'Output'
-    output_path.mkdir(parents=True, exist_ok=True)
+        output_root = ROOT / 'Output'
+    
+    # Resolve output paths using new system
+    from src.output_paths import resolve_run_paths, create_run_manifest
+    
+    if epoch is None:
+        raise ValueError("Epoch must be provided or inferrable from config name")
+    
+    output_paths = resolve_run_paths(
+        output_root=output_root,
+        epoch=epoch,
+        config_path=config_path_resolved,
+        run_id=args.run_id
+    )
+    
+    print(f"Run ID: {output_paths['run_id']}")
+    print(f"Output root: {output_root}")
+    print(f"Run directory: {output_paths['run_dir']}")
     
     # Generate demandpack
-    print("Generating DemandPack...")
+    if epoch:
+        print(f"Generating DemandPack for epoch {epoch}...")
+    else:
+        print("Generating DemandPack...")
     df = generate_demandpack(str(config_path_resolved), cap_peak_mw_override=args.cap_peak_mw)
     
-    # Save CSV (timestamp_utc is already in ISO Z format as string)
-    config = load_config(str(config_path_resolved))
-    # Use output_dir if provided, otherwise use config value
-    if args.output_dir:
-        output_csv = output_path / Path(config['general']['output_csv']).name
-    else:
-        # Resolve output_csv from config relative to repo root
-        output_csv = resolve_path(config['general']['output_csv'])
+    # Save CSV to run_demandpack_dir
+    output_csv = output_paths['run_demandpack_dir'] / f'hourly_heat_demand_{epoch}.csv'
     df.to_csv(output_csv, index=False)
     print(f"[OK] Saved output to {output_csv}")
+    
+    # Create run manifest
+    config = load_config(str(config_path_resolved))
+    # Try to find factor files from config for manifest
+    factor_files = {}
+    try:
+        if 'factors' in config:
+            factors_cfg = config['factors']
+            for key in ['seasonal_factors', 'weekday_factors', 'daily_factors']:
+                if key in factors_cfg:
+                    factor_path = resolve_cfg_path(config_path_resolved, factors_cfg[key])
+                    if factor_path.exists():
+                        factor_files[key] = factor_path
+    except Exception:
+        pass  # Factor files optional for manifest
+    
+    create_run_manifest(
+        output_paths=output_paths,
+        epoch=epoch,
+        config_path=config_path_resolved,
+        output_root=output_root,
+        factor_files=factor_files if factor_files else None
+    )
     
     # Print summary statistics
     print("\nSummary Statistics:")

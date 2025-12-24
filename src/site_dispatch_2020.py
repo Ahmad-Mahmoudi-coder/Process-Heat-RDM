@@ -20,6 +20,7 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 from typing import Tuple, Optional, Dict, Union
+from scipy.optimize import linprog
 
 from src.path_utils import repo_root, resolve_path, resolve_cfg_path, input_root
 from src.load_signals import load_signals_config, get_signals_for_epoch, map_eval_epoch_to_signals_epoch
@@ -229,6 +230,99 @@ def load_utilities(path: str, epoch: int = None) -> pd.DataFrame:
     return df
 
 
+def load_maintenance_windows(path: Path, unit_ids: list, demand_timestamps: pd.Series) -> pd.DataFrame:
+    """
+    Load maintenance windows CSV and build per-unit hourly availability multipliers.
+    
+    Schema:
+    - unit_id, start_timestamp_utc, end_timestamp_utc, availability
+    
+    Args:
+        path: Path to maintenance windows CSV file
+        unit_ids: List of unit IDs from utilities (for validation)
+        demand_timestamps: Series of demand timestamps (for alignment)
+        
+    Returns:
+        DataFrame with columns: timestamp_utc, unit_id, availability_multiplier
+        availability_multiplier is 0.0 during outages (availability==0), 1.0 otherwise
+        
+    Raises:
+        FileNotFoundError: If file doesn't exist (optional file, caller should handle)
+        ValueError: If validation fails (invalid unit_id, malformed timestamps, etc.)
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"Maintenance windows file not found: {path}")
+    
+    df = pd.read_csv(path)
+    
+    # Validate required columns
+    required_cols = ['unit_id', 'start_timestamp_utc', 'end_timestamp_utc', 'availability']
+    missing = [col for col in required_cols if col not in df.columns]
+    if missing:
+        raise ValueError(f"Maintenance windows CSV missing required columns: {missing}")
+    
+    # Parse timestamps
+    df['start_timestamp_utc'] = parse_any_timestamp(df['start_timestamp_utc'])
+    df['end_timestamp_utc'] = parse_any_timestamp(df['end_timestamp_utc'])
+    
+    # Validate: start < end
+    invalid = df[df['start_timestamp_utc'] >= df['end_timestamp_utc']]
+    if len(invalid) > 0:
+        raise ValueError(
+            f"Invalid maintenance windows (start >= end):\n{invalid[['unit_id', 'start_timestamp_utc', 'end_timestamp_utc']]}"
+        )
+    
+    # Validate availability values (should be 0 or 1)
+    invalid_avail = df[~df['availability'].isin([0, 1])]
+    if len(invalid_avail) > 0:
+        raise ValueError(
+            f"Invalid availability values (must be 0 or 1):\n{invalid_avail[['unit_id', 'availability']]}"
+        )
+    
+    # Validate unit_ids exist in utilities
+    invalid_units = df[~df['unit_id'].isin(unit_ids)]
+    if len(invalid_units) > 0:
+        invalid_list = invalid_units['unit_id'].unique().tolist()
+        raise ValueError(
+            f"Maintenance windows reference unknown unit_id(s): {invalid_list}. "
+            f"Available units: {unit_ids}"
+        )
+    
+    # Build availability matrix: default 1.0, set to 0.0 during outages
+    # Create DataFrame with all (timestamp, unit_id) combinations
+    availability_df = pd.DataFrame({
+        'timestamp_utc': demand_timestamps.values
+    })
+    
+    # Initialize all units to 1.0 (available)
+    for unit_id in unit_ids:
+        availability_df[unit_id] = 1.0
+    
+    # Apply outages: for each window with availability==0, set multiplier to 0.0
+    outages = df[df['availability'] == 0]
+    for _, outage in outages.iterrows():
+        unit_id = outage['unit_id']
+        start = outage['start_timestamp_utc']
+        end = outage['end_timestamp_utc']
+        
+        # Set availability to 0.0 for timestamps in [start, end)
+        mask = (availability_df['timestamp_utc'] >= start) & (availability_df['timestamp_utc'] < end)
+        availability_df.loc[mask, unit_id] = 0.0
+    
+    # Convert to long form: timestamp_utc, unit_id, availability_multiplier
+    long_results = []
+    for _, row in availability_df.iterrows():
+        timestamp = row['timestamp_utc']
+        for unit_id in unit_ids:
+            long_results.append({
+                'timestamp_utc': timestamp,
+                'unit_id': unit_id,
+                'availability_multiplier': row[unit_id]
+            })
+    
+    return pd.DataFrame(long_results)
+
+
 def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame, dt_h: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Allocate heat demand across utilities proportionally by capacity (vectorized).
@@ -308,6 +402,345 @@ def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame, d
     dispatch_long = pd.DataFrame(long_results)
     
     return dispatch_long, dispatch_wide
+
+
+def allocate_dispatch_lp(
+    demand_df: pd.DataFrame,
+    util_df: pd.DataFrame,
+    signals: Union[Dict[str, float], pd.DataFrame],
+    dt_h: float,
+    maintenance_availability: Optional[pd.DataFrame] = None,
+    electricity_signals: Optional[pd.DataFrame] = None,
+    unserved_penalty_nzd_per_MWh: float = 10000.0
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Allocate dispatch using hourly linear programming with equality constraints.
+    
+    This mode enforces strict hourly heat balance: sum(heat_MW) + unserved_MW == demand_MW
+    for every hour, ensuring energy closure by construction.
+    
+    Variables per hour:
+    - heat_MW[u,t] >= 0 for each unit u
+    - unserved_MW[t] >= 0
+    
+    Constraints per hour:
+    - Equality: sum_u heat_MW[u,t] + unserved_MW[t] == demand_MW[t]
+    - Capacity: heat_MW[u,t] <= max_heat_MW[u] * a[u,t] (where a is maintenance availability)
+    - Headroom (if electricity_signals provided): sum_{u electric} heat_MW[u,t]/efficiency[u] <= headroom_MW[t]
+    
+    Objective: Minimize total cost (fuel + VOLL * unserved_energy)
+    
+    Args:
+        demand_df: DataFrame with timestamp_utc and heat_demand_MW
+        util_df: DataFrame with unit information
+        signals: Either dict (flat prices) or DataFrame (time-varying prices with timestamp_utc)
+        dt_h: Timestep duration in hours
+        maintenance_availability: Optional DataFrame with columns: timestamp_utc, unit_id, availability_multiplier
+        electricity_signals: Optional DataFrame with columns: timestamp_utc, elec_price_nzd_per_MWh, headroom_MW
+        unserved_penalty_nzd_per_MWh: Value of lost load (default: 10000)
+        
+    Returns:
+        Tuple of (long-form DataFrame, wide-form DataFrame)
+        Long-form includes: timestamp_utc, unit_id, heat_MW, fuel_MWh, co2_tonnes, unserved_MW
+    """
+    unit_ids = util_df['unit_id'].tolist()
+    n_units = len(unit_ids)
+    n_timesteps = len(demand_df)
+    
+    # Build unit info maps
+    unit_to_idx = {uid: i for i, uid in enumerate(unit_ids)}
+    max_heat = {uid: util_df[util_df['unit_id'] == uid]['max_heat_MW'].iloc[0] for uid in unit_ids}
+    efficiency = {uid: util_df[util_df['unit_id'] == uid]['efficiency_th'].iloc[0] for uid in unit_ids}
+    fuel_type = {uid: util_df[util_df['unit_id'] == uid]['fuel'].iloc[0].lower().strip() for uid in unit_ids}
+    
+    # Identify electric units
+    electric_units = [
+        uid for uid in unit_ids
+        if fuel_type[uid] == 'electricity' or 
+        util_df[util_df['unit_id'] == uid]['tech_type'].iloc[0].lower().strip() == 'electrode_boiler'
+    ]
+    
+    # Build dispatch priority for tie-breaking (deterministic: sorted unit_id order)
+    # Lower priority number = higher dispatch preference (when costs are equal)
+    sorted_unit_ids = sorted(unit_ids)
+    dispatch_priority = {uid: i for i, uid in enumerate(sorted_unit_ids)}  # 0 = highest priority
+    
+    # Build maintenance availability matrix (default 1.0)
+    if maintenance_availability is not None:
+        avail_pivot = maintenance_availability.pivot(
+            index='timestamp_utc',
+            columns='unit_id',
+            values='availability_multiplier'
+        )
+        # Ensure all units are present
+        for uid in unit_ids:
+            if uid not in avail_pivot.columns:
+                avail_pivot[uid] = 1.0
+        avail_matrix = avail_pivot[unit_ids].values  # Shape: (n_timesteps, n_units)
+    else:
+        avail_matrix = np.ones((n_timesteps, n_units))
+    
+    # Build headroom constraint series (if provided)
+    headroom_series = None
+    if electricity_signals is not None and 'headroom_MW' in electricity_signals.columns:
+        # Align to demand timestamps
+        headroom_aligned = demand_df[['timestamp_utc']].merge(
+            electricity_signals[['timestamp_utc', 'headroom_MW']],
+            on='timestamp_utc',
+            how='left'
+        )
+        if headroom_aligned['headroom_MW'].isna().any():
+            raise ValueError("headroom_MW alignment failed: missing timestamps")
+        headroom_series = headroom_aligned['headroom_MW'].values
+    
+    # Solve LP for each hour
+    long_results = []
+    demand_values = demand_df['heat_demand_MW'].values
+    
+    for t in range(n_timesteps):
+        timestamp = demand_df.iloc[t]['timestamp_utc']
+        demand_t = demand_values[t]
+        
+        # Build LP problem for this hour
+        # Variables: [heat_MW[unit_0], ..., heat_MW[unit_n-1], unserved_MW]
+        n_vars = n_units + 1  # n_units + unserved
+        
+        # Objective: minimize cost + tie-breaker
+        # Cost = sum_u (fuel_cost[u] * heat_MW[u] * dt_h / efficiency[u]) + VOLL * unserved_MW * dt_h
+        # Tie-breaker: add epsilon * priority * heat_MWh to make results deterministic
+        # Lower priority number = higher dispatch preference (when costs are equal)
+        c = np.zeros(n_vars)
+        epsilon_tie_breaker = 1e-6  # Small epsilon to break ties deterministically
+        
+        # Get fuel prices (time-varying if signals is DataFrame, else flat)
+        for i, uid in enumerate(unit_ids):
+            if isinstance(signals, pd.DataFrame):
+                # Time-varying prices: get row for this timestamp
+                sig_row = signals[signals['timestamp_utc'] == timestamp]
+                if len(sig_row) == 0:
+                    raise ValueError(f"No signals row found for timestamp {timestamp}")
+                sig_row = sig_row.iloc[0]
+                
+                if fuel_type[uid] in ['lignite', 'coal']:
+                    fuel_price = sig_row.get('coal_price_nzd_per_MWh_fuel', 0.0)
+                elif fuel_type[uid] == 'biomass':
+                    fuel_price = sig_row.get('biomass_price_nzd_per_MWh_fuel', 0.0)
+                elif fuel_type[uid] == 'electricity':
+                    # Use time-varying electricity price if available
+                    fuel_price = sig_row.get('elec_price_nzd_per_MWh', 0.0)
+                else:
+                    fuel_price = 0.0
+            else:
+                # Flat prices from dict
+                if fuel_type[uid] in ['lignite', 'coal']:
+                    fuel_price = signals.get('coal_price_nzd_per_MWh_fuel', 0.0)
+                elif fuel_type[uid] == 'biomass':
+                    fuel_price = signals.get('biomass_price_nzd_per_MWh_fuel', 0.0)
+                elif fuel_type[uid] == 'electricity':
+                    fuel_price = signals.get('electricity_price_nzd_per_MWh_fuel', 0.0)
+                else:
+                    fuel_price = 0.0
+            
+            # Cost per MW_heat = (fuel_price / efficiency) * dt_h
+            base_cost = (fuel_price / efficiency[uid]) * dt_h if efficiency[uid] > 0 else 0.0
+            # Add tie-breaker: epsilon * priority * dt_h (lower priority number = higher preference)
+            # This makes results deterministic when units have identical costs
+            c[i] = base_cost + epsilon_tie_breaker * dispatch_priority[uid] * dt_h
+        
+        # Unserved penalty cost (no tie-breaker needed, it's always last resort)
+        c[n_units] = unserved_penalty_nzd_per_MWh * dt_h
+        
+        # Constraints
+        # 1. Equality: sum(heat_MW) + unserved_MW == demand_MW
+        A_eq = np.ones((1, n_vars))
+        A_eq[0, n_units] = 1.0  # unserved coefficient
+        b_eq = np.array([demand_t])
+        
+        # 2. Capacity bounds: 0 <= heat_MW[u] <= max_heat[u] * avail[u,t]
+        # 3. Unserved: 0 <= unserved_MW
+        bounds = []
+        for i, uid in enumerate(unit_ids):
+            max_cap = max_heat[uid] * avail_matrix[t, i]
+            bounds.append((0.0, max_cap))
+        bounds.append((0.0, demand_t))  # unserved cannot exceed demand
+        
+        # 4. Headroom constraint (if electric units and headroom provided)
+        # IMPORTANT: Constraint is in electricity MW, not heat MW
+        # incremental_electricity_MW[t] = sum_{u electric} heat_MW[u,t] / efficiency[u]
+        # Constraint: incremental_electricity_MW[t] <= headroom_MW[t]
+        A_ub = None
+        b_ub = None
+        if headroom_series is not None and len(electric_units) > 0 and headroom_series[t] >= 0:
+            # Constraint: sum_{u electric} heat_MW[u]/efficiency[u] <= headroom_MW[t]
+            # This is correct: heat_MW / efficiency = electricity_MW
+            A_ub = np.zeros((1, n_vars))
+            for uid in electric_units:
+                idx = unit_to_idx[uid]
+                A_ub[0, idx] = 1.0 / efficiency[uid]  # Convert heat MW to electricity MW
+            b_ub = np.array([headroom_series[t]])
+        
+        # Solve LP
+        try:
+            result = linprog(c, A_eq=A_eq, b_eq=b_eq, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+            
+            if not result.success:
+                raise ValueError(
+                    f"LP solver failed at timestamp {timestamp}: {result.message}. "
+                    f"Demand: {demand_t:.2f} MW, Available capacity: {sum(max_heat[uid] * avail_matrix[t, i] for i, uid in enumerate(unit_ids)):.2f} MW"
+                )
+            
+            # Extract solution
+            heat_values = result.x[:n_units]
+            unserved = result.x[n_units]
+            
+            # Verify equality (should be exact due to constraint, but check for numerical issues)
+            served = heat_values.sum()
+            closure_error = abs(served + unserved - demand_t)
+            if closure_error > 1e-6:
+                # Reconciliation step: recompute unserved to ensure exact equality
+                unserved_reconciled = max(0.0, demand_t - served)
+                if abs(unserved_reconciled - unserved) > 1e-3:
+                    print(f"[WARN] LP solution had closure error {closure_error:.6f} MW at {timestamp}, reconciling unserved")
+                    unserved = unserved_reconciled
+                else:
+                    raise ValueError(
+                        f"LP solution violates equality constraint at {timestamp}: "
+                        f"served={served:.6f}, unserved={unserved:.6f}, demand={demand_t:.6f}, error={closure_error:.6f}"
+                    )
+            
+        except Exception as e:
+            raise ValueError(f"LP dispatch failed at timestamp {timestamp}: {e}")
+        
+        # Build results for this hour
+        for i, uid in enumerate(unit_ids):
+            heat_mw = heat_values[i]
+            eff = efficiency[uid]
+            
+            # Energy per step
+            fuel_mwh = (heat_mw * dt_h) / eff if eff > 0 and heat_mw > 0 else 0.0
+            co2_factor = util_df[util_df['unit_id'] == uid]['co2_factor_t_per_MWh_fuel'].iloc[0]
+            co2_tonnes = fuel_mwh * co2_factor
+            
+            # Store unserved only on first unit (system-level)
+            unserved_val = unserved if i == 0 else 0.0
+            
+            long_results.append({
+                'timestamp_utc': timestamp,
+                'unit_id': uid,
+                'heat_MW': heat_mw,
+                'fuel_MWh': fuel_mwh,
+                'co2_tonnes': co2_tonnes,
+                'unserved_MW': unserved_val
+            })
+    
+    dispatch_long = pd.DataFrame(long_results)
+    
+    # Final reconciliation: ensure unserved = demand - served for all timestamps (safeguard)
+    for timestamp in demand_df['timestamp_utc'].unique():
+        ts_mask = dispatch_long['timestamp_utc'] == timestamp
+        demand_ts = demand_df[demand_df['timestamp_utc'] == timestamp]['heat_demand_MW'].iloc[0]
+        served_ts = dispatch_long.loc[ts_mask, 'heat_MW'].sum()
+        unserved_correct = max(0.0, demand_ts - served_ts)
+        
+        # Update unserved on first unit row only
+        first_unit_mask = ts_mask & (dispatch_long['unit_id'] == dispatch_long.loc[ts_mask, 'unit_id'].iloc[0])
+        dispatch_long.loc[first_unit_mask, 'unserved_MW'] = unserved_correct
+        # Zero out unserved on other unit rows
+        other_units_mask = ts_mask & ~first_unit_mask
+        dispatch_long.loc[other_units_mask, 'unserved_MW'] = 0.0
+    
+    # Build wide-form
+    dispatch_wide = dispatch_long.pivot_table(
+        index='timestamp_utc',
+        columns='unit_id',
+        values='heat_MW',
+        aggfunc='sum'
+    ).reset_index()
+    
+    # Rename unit columns
+    unit_cols = [col for col in dispatch_wide.columns if col != 'timestamp_utc']
+    rename_dict = {col: f"{col}_MW" for col in unit_cols}
+    dispatch_wide = dispatch_wide.rename(columns=rename_dict)
+    
+    # Add total_heat_MW and unserved_MW (from first unit row per timestamp)
+    dispatch_wide['total_heat_MW'] = dispatch_wide[[col for col in dispatch_wide.columns if col.endswith('_MW') and col != 'total_heat_MW']].sum(axis=1)
+    unserved_by_ts = dispatch_long.groupby('timestamp_utc')['unserved_MW'].first()
+    dispatch_wide = dispatch_wide.merge(
+        unserved_by_ts.reset_index(),
+        on='timestamp_utc',
+        how='left'
+    )
+    
+    # Reorder columns
+    unit_cols_sorted = sorted([col for col in dispatch_wide.columns if col.endswith('_MW') and col not in ['total_heat_MW', 'unserved_MW']])
+    dispatch_wide = dispatch_wide[['timestamp_utc', 'total_heat_MW', 'unserved_MW'] + unit_cols_sorted]
+    
+    return dispatch_long, dispatch_wide
+
+
+def export_incremental_electricity(
+    dispatch_long: pd.DataFrame,
+    util_df: pd.DataFrame,
+    demand_df: pd.DataFrame,
+    output_path: Path
+) -> None:
+    """
+    Export incremental electricity demand from electrode boilers.
+    
+    Computes: incremental_electricity_MW[t] = sum_{u in electric units} heat_MW[u,t] / efficiency_th[u]
+    
+    Args:
+        dispatch_long: Long-form dispatch DataFrame with heat_MW
+        util_df: Utilities DataFrame
+        demand_df: Demand DataFrame (for timestamp alignment)
+        output_path: Path to write CSV
+        
+    Raises:
+        ValueError: If timestamps don't align exactly
+    """
+    # Identify electric units
+    electric_units = util_df[
+        (util_df['fuel'].str.lower().str.strip() == 'electricity') |
+        (util_df['tech_type'].str.lower().str.strip() == 'electrode_boiler')
+    ]['unit_id'].tolist()
+    
+    if len(electric_units) == 0:
+        # No electric units - write zero series
+        result = pd.DataFrame({
+            'timestamp_utc': demand_df['timestamp_utc'],
+            'incremental_electricity_MW': 0.0
+        })
+    else:
+        # Compute incremental electricity per timestep
+        electric_dispatch = dispatch_long[dispatch_long['unit_id'].isin(electric_units)].copy()
+        
+        # Merge efficiency
+        eff_map = dict(zip(util_df['unit_id'], util_df['efficiency_th']))
+        electric_dispatch['efficiency'] = electric_dispatch['unit_id'].map(eff_map)
+        
+        # Compute electricity demand: heat_MW / efficiency
+        electric_dispatch['elec_MW'] = electric_dispatch['heat_MW'] / electric_dispatch['efficiency']
+        
+        # Aggregate by timestamp
+        elec_by_ts = electric_dispatch.groupby('timestamp_utc')['elec_MW'].sum().reset_index()
+        elec_by_ts.columns = ['timestamp_utc', 'incremental_electricity_MW']
+        
+        # Align to demand timestamps (strict merge)
+        result = demand_df[['timestamp_utc']].merge(
+            elec_by_ts,
+            on='timestamp_utc',
+            how='left',
+            validate='one_to_one'
+        )
+        result['incremental_electricity_MW'] = result['incremental_electricity_MW'].fillna(0.0)
+    
+    # Convert timestamps to ISO Z format
+    result['timestamp_utc'] = to_iso_z(result['timestamp_utc'])
+    
+    # Write CSV
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(output_path, index=False)
+    print(f"[OK] Exported incremental electricity demand to {output_path}")
 
 
 def compute_marginal_cost_heat(util_row: pd.Series, signals: Dict[str, float]) -> float:
@@ -1024,7 +1457,7 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
 
 
 def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame, 
-                          signals: Dict[str, float], dt_h: float = 1.0) -> pd.DataFrame:
+                          signals: Union[Dict[str, float], pd.DataFrame], dt_h: float = 1.0) -> pd.DataFrame:
     """
     Add cost columns to dispatch DataFrame based on fuel type and signals.
     
@@ -1058,9 +1491,25 @@ def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
         dispatch_long['carbon_cost_nzd'] = dispatch_long['carbon_cost_nzd'].astype(float).fillna(0.0)
     
     # Get ETS price (same for all units) - handle missing with warning
-    ets_price = signals.get('ets_price_nzd_per_tCO2', 0.0)
-    if ets_price == 0.0 and 'ets_price_nzd_per_tCO2' not in signals:
-        print("[WARN] ETS price (ets_price_nzd_per_tCO2) not found in signals, defaulting to 0.0")
+    # Handle both dict and DataFrame signals
+    is_time_varying = isinstance(signals, pd.DataFrame)
+    if is_time_varying:
+        if 'ets_price_nzd_per_tCO2' in signals.columns:
+            # Time-varying ETS (unusual, but handle it)
+            ets_price_series = signals['ets_price_nzd_per_tCO2']
+            # Use first value as default (should be constant, but handle variation)
+            ets_price = ets_price_series.iloc[0] if len(ets_price_series) > 0 else 0.0
+        else:
+            # Fallback: use default
+            ets_price = 0.0
+            print("[WARN] ETS price (ets_price_nzd_per_tCO2) not found in signals DataFrame, defaulting to 0.0")
+    else:
+        ets_price = signals.get('ets_price_nzd_per_tCO2', 0.0)
+        if ets_price == 0.0 and 'ets_price_nzd_per_tCO2' not in signals:
+            print("[WARN] ETS price (ets_price_nzd_per_tCO2) not found in signals, defaulting to 0.0")
+    
+    # Handle time-varying vs flat signals
+    is_time_varying = isinstance(signals, pd.DataFrame)
     
     # Process by fuel type
     for fuel_type in dispatch_long['fuel_type'].unique():
@@ -1068,29 +1517,110 @@ def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
         
         if fuel_type == 'lignite' or fuel_type == 'coal':
             # Use coal price and ETS
-            # fuel_MWh is already energy per step, so multiply by price directly
-            coal_price = signals.get('coal_price_nzd_per_MWh_fuel', 0.0)
-            if coal_price == 0.0 and 'coal_price_nzd_per_MWh_fuel' not in signals:
-                print("[WARN] Coal price (coal_price_nzd_per_MWh_fuel) not found in signals, defaulting to 0.0")
-            dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
-                dispatch_long.loc[mask, 'fuel_MWh'] * coal_price
-            )
-            dispatch_long.loc[mask, 'carbon_cost_nzd'] = (
-                dispatch_long.loc[mask, 'co2_tonnes'] * ets_price
-            )
+            if is_time_varying:
+                # Merge time-varying prices
+                dispatch_with_sigs = dispatch_long.loc[mask, ['timestamp_utc', 'fuel_MWh', 'co2_tonnes']].merge(
+                    signals[['timestamp_utc', 'coal_price_nzd_per_MWh_fuel']],
+                    on='timestamp_utc',
+                    how='left'
+                )
+                if dispatch_with_sigs['coal_price_nzd_per_MWh_fuel'].isna().any():
+                    raise ValueError("Coal price alignment failed: missing timestamps")
+                dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
+                    dispatch_with_sigs['fuel_MWh'] * dispatch_with_sigs['coal_price_nzd_per_MWh_fuel']
+                ).values
+            else:
+                # Flat price from dict
+                coal_price = signals.get('coal_price_nzd_per_MWh_fuel', 0.0)
+                if coal_price == 0.0 and 'coal_price_nzd_per_MWh_fuel' not in signals:
+                    print("[WARN] Coal price (coal_price_nzd_per_MWh_fuel) not found in signals, defaulting to 0.0")
+                dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
+                    dispatch_long.loc[mask, 'fuel_MWh'] * coal_price
+                )
+            
+            # Carbon cost (ETS price is typically flat, but handle time-varying if needed)
+            if is_time_varying and 'ets_price_nzd_per_tCO2' in signals.columns:
+                dispatch_with_ets = dispatch_long.loc[mask, ['timestamp_utc', 'co2_tonnes']].merge(
+                    signals[['timestamp_utc', 'ets_price_nzd_per_tCO2']],
+                    on='timestamp_utc',
+                    how='left'
+                )
+                dispatch_long.loc[mask, 'carbon_cost_nzd'] = (
+                    dispatch_with_ets['co2_tonnes'] * dispatch_with_ets['ets_price_nzd_per_tCO2']
+                ).values
+            else:
+                # Use the ets_price from outer scope (already set)
+                dispatch_long.loc[mask, 'carbon_cost_nzd'] = (
+                    dispatch_long.loc[mask, 'co2_tonnes'] * ets_price
+                )
+                
         elif fuel_type == 'biomass':
-            # Use biomass price and minimal ETS (biomass has low emissions factor)
-            biomass_price = signals.get('biomass_price_nzd_per_MWh_fuel', 0.0)
-            if biomass_price == 0.0 and 'biomass_price_nzd_per_MWh_fuel' not in signals:
-                print("[WARN] Biomass price (biomass_price_nzd_per_MWh_fuel) not found in signals, defaulting to 0.0")
-            dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
-                dispatch_long.loc[mask, 'fuel_MWh'] * biomass_price
-            )
-            # Biomass CO2 is mostly biogenic, but may still have small ETS cost
-            # For now, apply ETS to the small non-biogenic portion
-            dispatch_long.loc[mask, 'carbon_cost_nzd'] = (
-                dispatch_long.loc[mask, 'co2_tonnes'] * ets_price
-            )
+            # Use biomass price and minimal ETS
+            if is_time_varying:
+                dispatch_with_sigs = dispatch_long.loc[mask, ['timestamp_utc', 'fuel_MWh', 'co2_tonnes']].merge(
+                    signals[['timestamp_utc', 'biomass_price_nzd_per_MWh_fuel']],
+                    on='timestamp_utc',
+                    how='left'
+                )
+                if dispatch_with_sigs['biomass_price_nzd_per_MWh_fuel'].isna().any():
+                    raise ValueError("Biomass price alignment failed: missing timestamps")
+                dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
+                    dispatch_with_sigs['fuel_MWh'] * dispatch_with_sigs['biomass_price_nzd_per_MWh_fuel']
+                ).values
+            else:
+                biomass_price = signals.get('biomass_price_nzd_per_MWh_fuel', 0.0)
+                if biomass_price == 0.0 and 'biomass_price_nzd_per_MWh_fuel' not in signals:
+                    print("[WARN] Biomass price (biomass_price_nzd_per_MWh_fuel) not found in signals, defaulting to 0.0")
+                dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
+                    dispatch_long.loc[mask, 'fuel_MWh'] * biomass_price
+                )
+            
+            # Carbon cost
+            if is_time_varying and 'ets_price_nzd_per_tCO2' in signals.columns:
+                dispatch_with_ets = dispatch_long.loc[mask, ['timestamp_utc', 'co2_tonnes']].merge(
+                    signals[['timestamp_utc', 'ets_price_nzd_per_tCO2']],
+                    on='timestamp_utc',
+                    how='left'
+                )
+                dispatch_long.loc[mask, 'carbon_cost_nzd'] = (
+                    dispatch_with_ets['co2_tonnes'] * dispatch_with_ets['ets_price_nzd_per_tCO2']
+                ).values
+            else:
+                dispatch_long.loc[mask, 'carbon_cost_nzd'] = (
+                    dispatch_long.loc[mask, 'co2_tonnes'] * ets_price
+                )
+                
+        elif fuel_type == 'electricity':
+            # Use time-varying electricity price if available, else flat
+            if is_time_varying:
+                if 'elec_price_nzd_per_MWh' in signals.columns:
+                    dispatch_with_sigs = dispatch_long.loc[mask, ['timestamp_utc', 'fuel_MWh']].merge(
+                        signals[['timestamp_utc', 'elec_price_nzd_per_MWh']],
+                        on='timestamp_utc',
+                        how='left'
+                    )
+                    if dispatch_with_sigs['elec_price_nzd_per_MWh'].isna().any():
+                        raise ValueError("Electricity price alignment failed: missing timestamps")
+                    dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
+                        dispatch_with_sigs['fuel_MWh'] * dispatch_with_sigs['elec_price_nzd_per_MWh']
+                    ).values
+                else:
+                    # Fallback to flat price from signals dict if present
+                    elec_price = 0.0
+                    if hasattr(signals, 'get'):
+                        elec_price = signals.get('electricity_price_nzd_per_MWh_fuel', 0.0)
+                    dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
+                        dispatch_long.loc[mask, 'fuel_MWh'] * elec_price
+                    )
+            else:
+                elec_price = signals.get('electricity_price_nzd_per_MWh_fuel', 0.0)
+                dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
+                    dispatch_long.loc[mask, 'fuel_MWh'] * elec_price
+                )
+            
+            # Electricity has no direct CO2 emissions (grid emissions handled separately)
+            dispatch_long.loc[mask, 'carbon_cost_nzd'] = 0.0
+            
         else:
             # Unknown fuel type - warn but don't fail
             print(f"[WARNING] Unknown fuel type '{fuel_type}', costs set to zero")
@@ -1727,11 +2257,11 @@ def main():
                        help='Path to site utilities CSV (default: auto-discover from Input/site/utilities/)')
     parser.add_argument('--demandpack-config', default=None,
                        help='Path to demandpack config (optional, used to check for utilities path)')
-    parser.add_argument('--mode', choices=['proportional', 'optimal_subset'], default='proportional',
-                       help='Dispatch mode: proportional (default) or optimal_subset')
+    parser.add_argument('--mode', choices=['proportional', 'optimal_subset', 'lp'], default='proportional',
+                       help='Dispatch mode: proportional (default), optimal_subset, or lp (linear programming with equality constraints)')
     parser.add_argument('--commitment-block-hours', type=int, default=24,
                        help='Hours per commitment block for optimal_subset mode (default: 24 = daily)')
-    parser.add_argument('--unserved-penalty-nzd-per-MWh', type=float, default=50000.0,
+    parser.add_argument('--unserved-penalty-nzd-per-MWh', type=float, default= 10000.0,
                        help='Penalty for unserved demand in optimal_subset mode (default: 50000)')
     parser.add_argument('--reserve-frac', type=float, default=0.0,
                        help='Reserve requirement fraction of demand for optimal_subset mode (default: 0.0)')
@@ -1757,6 +2287,13 @@ def main():
                        help='Output root directory (default: repo_root/Output)')
     parser.add_argument('--run-id', type=str, default=None,
                        help='Run ID (if provided, writes to run_dir; otherwise uses output-dir or Output/)')
+    parser.add_argument('--maintenance-windows-csv', type=str, default=None,
+                       help='Path to maintenance windows CSV (optional)')
+    parser.add_argument('--electricity-signals-csv', type=str, default=None,
+                       help='Path to electricity signals CSV with ToU prices and headroom (optional)')
+    parser.add_argument('--grid-emissions-csv', type=str, default=None,
+                       help='Path to grid emissions intensity CSV (optional, for reporting)')
+
     args = parser.parse_args()
     
     epoch = args.epoch
@@ -1945,10 +2482,70 @@ def main():
         print(f"[WARN] Epoch mapping: eval_epoch {epoch} -> signals_epoch {signals_epoch}")
     signals = get_signals_for_epoch(signals_config, str(signals_epoch))
     
+    # Load maintenance windows if provided
+    maintenance_availability = None
+    if args.maintenance_windows_csv:
+        maintenance_path = resolve_path(args.maintenance_windows_csv)
+        print(f"Loading maintenance windows from {maintenance_path}...")
+        try:
+            maintenance_availability = load_maintenance_windows(
+                maintenance_path,
+                util_df['unit_id'].tolist(),
+                demand_df['timestamp_utc']
+            )
+            print(f"[OK] Loaded maintenance windows for {len(maintenance_availability['unit_id'].unique())} units")
+        except FileNotFoundError:
+            print(f"[WARN] Maintenance windows file not found: {maintenance_path}, continuing without maintenance constraints")
+        except Exception as e:
+            raise ValueError(f"Failed to load maintenance windows: {e}")
+    
+    # Load electricity signals if provided (for ToU pricing and headroom)
+    electricity_signals = None
+    if args.electricity_signals_csv:
+        elec_sig_path = resolve_path(args.electricity_signals_csv)
+        print(f"Loading electricity signals from {elec_sig_path}...")
+        try:
+            electricity_signals = pd.read_csv(elec_sig_path)
+            electricity_signals['timestamp_utc'] = parse_any_timestamp(electricity_signals['timestamp_utc'])
+            # Align to demand timestamps
+            from src.load_gxp_signals import align_signals_to_demand
+            electricity_signals = align_signals_to_demand(electricity_signals, demand_df, "electricity_signals")
+            print(f"[OK] Loaded electricity signals with ToU pricing and headroom")
+        except Exception as e:
+            raise ValueError(f"Failed to load electricity signals: {e}")
+    
+    # Prepare signals for dispatch (time-varying if electricity_signals provided, else flat dict)
+    if electricity_signals is not None:
+        # Merge electricity prices into signals DataFrame if not already present
+        if 'elec_price_nzd_per_MWh' not in electricity_signals.columns:
+            # Fallback to flat price from signals dict
+            if 'electricity_price_nzd_per_MWh_fuel' in signals:
+                electricity_signals['elec_price_nzd_per_MWh'] = signals['electricity_price_nzd_per_MWh_fuel']
+            else:
+                electricity_signals['elec_price_nzd_per_MWh'] = 0.0
+                print("[WARN] No electricity price found, defaulting to 0.0")
+        
+        # Add other signal prices (flat) to each row
+        for key in ['coal_price_nzd_per_MWh_fuel', 'biomass_price_nzd_per_MWh_fuel', 'ets_price_nzd_per_tCO2']:
+            if key in signals:
+                electricity_signals[key] = signals[key]
+        
+        signals_for_dispatch = electricity_signals
+    else:
+        signals_for_dispatch = signals
+    
     # Compute dispatch based on mode
     if args.mode == 'proportional':
         print("Computing proportional dispatch...")
         dispatch_long, dispatch_wide = allocate_baseline_dispatch(demand_df, util_df, dt_h)
+    elif args.mode == 'lp':
+        print("Computing LP dispatch with equality constraints...")
+        dispatch_long, dispatch_wide = allocate_dispatch_lp(
+            demand_df, util_df, signals_for_dispatch, dt_h,
+            maintenance_availability=maintenance_availability,
+            electricity_signals=electricity_signals,
+            unserved_penalty_nzd_per_MWh=args.unserved_penalty_nzd_per_MWh
+        )
     else:  # optimal_subset
         print(f"Computing optimal subset dispatch (block size: {args.commitment_block_hours}h)...")
         dispatch_long, dispatch_wide = allocate_dispatch_optimal_subset(
@@ -1968,7 +2565,10 @@ def main():
     dispatch_long = add_costs_to_dispatch(dispatch_long, util_df, signals, dt_h)
     
     # Validate dispatch outputs (energy closure, schema, etc.) - AFTER costs are added
-    validate_dispatch_outputs(dispatch_long, dispatch_wide, demand_df, dt_h)
+    validate_dispatch_outputs(dispatch_long, dispatch_wide, demand_df, dt_h,
+                               electricity_signals=electricity_signals,
+                               maintenance_availability=maintenance_availability,
+                               util_df=util_df)
     
     # Convert timestamp_utc to ISO Z format for CSV output (keep datetime internally)
     dispatch_long_for_csv = dispatch_long.copy()
@@ -1988,6 +2588,26 @@ def main():
     
     print(f"Saving wide-form dispatch to {args.out_dispatch_wide}...")
     dispatch_wide_for_csv.to_csv(args.out_dispatch_wide, index=False)
+    
+    # Export incremental electricity demand if electric units present
+    electric_units = util_df[
+        (util_df['fuel'].str.lower().str.strip() == 'electricity') |
+        (util_df['tech_type'].str.lower().str.strip() == 'electrode_boiler')
+    ]
+    if len(electric_units) > 0:
+        # Determine output path for electricity export
+        if args.run_id and args.output_root:
+            output_root = Path(args.output_root)
+            signals_dir = output_root / 'runs' / args.run_id / 'signals'
+            elec_export_path = signals_dir / f'incremental_electricity_MW_{epoch}.csv'
+        elif args.output_dir:
+            signals_dir = Path(args.output_dir) / 'signals'
+            elec_export_path = signals_dir / f'incremental_electricity_MW_{epoch}.csv'
+        else:
+            signals_dir = OUTPUT_DIR / 'signals'
+            elec_export_path = signals_dir / f'incremental_electricity_MW_{epoch}.csv'
+        
+        export_incremental_electricity(dispatch_long, util_df, demand_df, elec_export_path)
     
     # Validate hourly cost storage convention for optimal_subset mode
     if args.mode == 'optimal_subset':
@@ -2230,7 +2850,10 @@ def _canonicalize_timestamps(ts_series: Union[pd.Series, pd.Index]) -> pd.Series
 
 
 def validate_dispatch_outputs(dispatch_long: pd.DataFrame, dispatch_wide: pd.DataFrame, 
-                               demand_df: pd.DataFrame, dt_h: float) -> None:
+                               demand_df: pd.DataFrame, dt_h: float,
+                               electricity_signals: Optional[pd.DataFrame] = None,
+                               maintenance_availability: Optional[pd.DataFrame] = None,
+                               util_df: Optional[pd.DataFrame] = None) -> None:
     """
     Validate dispatch outputs for correctness (energy closure, schema, etc.).
     
@@ -2239,6 +2862,9 @@ def validate_dispatch_outputs(dispatch_long: pd.DataFrame, dispatch_wide: pd.Dat
         dispatch_wide: Wide-form dispatch DataFrame
         demand_df: Demand DataFrame with timestamp_utc and heat_demand_MW
         dt_h: Timestep duration in hours
+        electricity_signals: Optional electricity signals DataFrame (for headroom validation)
+        maintenance_availability: Optional maintenance availability DataFrame (for maintenance validation)
+        util_df: Optional utilities DataFrame (for headroom validation)
     """
     # 1. Required columns exist
     required_long_cols = ['timestamp_utc', 'unit_id', 'heat_MW', 'fuel_MWh', 'co2_tonnes', 
@@ -2361,16 +2987,17 @@ def validate_dispatch_outputs(dispatch_long: pd.DataFrame, dispatch_wide: pd.Dat
     if str(unserved_by_ts.index.tz) != 'UTC':
         raise ValueError(f"unserved_by_ts index timezone must be UTC, got {unserved_by_ts.index.tz}")
     
-    # Check closure: demand ≈ served + unserved
+    # Check closure: demand == served + unserved (STRICT - hard failure)
     tolerance = 1e-6  # MW
     closure_errors = (demand_by_ts - served_by_ts - unserved_by_ts).abs()
     max_error = closure_errors.max()
     if max_error > tolerance:
         max_error_idx = closure_errors.idxmax()
         raise ValueError(
-            f"Energy closure violation: max error = {max_error:.6f} MW at {max_error_idx}. "
-            f"demand={demand_by_ts[max_error_idx]:.6f}, served={served_by_ts[max_error_idx]:.6f}, "
-            f"unserved={unserved_by_ts[max_error_idx]:.6f}"
+            f"[VALIDATION FAILURE] Energy closure violation: max error = {max_error:.6f} MW at {max_error_idx}. "
+            f"demand={demand_by_ts[max_error_idx]:.6f} MW, served={served_by_ts[max_error_idx]:.6f} MW, "
+            f"unserved={unserved_by_ts[max_error_idx]:.6f} MW, sum={served_by_ts[max_error_idx] + unserved_by_ts[max_error_idx]:.6f} MW. "
+            f"Tolerance: {tolerance} MW. This is a hard failure - dispatch must satisfy served + unserved == demand exactly."
         )
     
     # 4. Annual energy totals use dt_h
@@ -2387,6 +3014,105 @@ def validate_dispatch_outputs(dispatch_long: pd.DataFrame, dispatch_wide: pd.Dat
         )
     
     print(f"[OK] Dispatch output validation passed: demand={demand_GWh:.3f} GWh, served={served_GWh:.3f} GWh, unserved={unserved_GWh:.3f} GWh")
+    
+    # 5. Headroom constraint validation (if electricity_signals provided)
+    if electricity_signals is not None and 'headroom_MW' in electricity_signals.columns:
+        # Compute incremental electricity from dispatch
+        electric_units = util_df[
+            (util_df['fuel'].str.lower().str.strip() == 'electricity') |
+            (util_df['tech_type'].str.lower().str.strip() == 'electrode_boiler')
+        ]
+        if len(electric_units) > 0:
+            electric_dispatch = dispatch_long[dispatch_long['unit_id'].isin(electric_units['unit_id'])].copy()
+            eff_map = dict(zip(util_df['unit_id'], util_df['efficiency_th']))
+            electric_dispatch['efficiency'] = electric_dispatch['unit_id'].map(eff_map)
+            electric_dispatch['elec_MW'] = electric_dispatch['heat_MW'] / electric_dispatch['efficiency']
+            
+            # Canonicalize timestamps before grouping to ensure tz-aware UTC index
+            electric_dispatch['_ts_canonical'] = _canonicalize_timestamps(electric_dispatch['timestamp_utc'])
+            elec_by_ts = electric_dispatch.groupby('_ts_canonical')['elec_MW'].sum()
+            # Ensure index is DatetimeIndex with UTC timezone
+            elec_by_ts.index = pd.DatetimeIndex(elec_by_ts.index, tz='UTC')
+            
+            # Align headroom - canonicalize timestamps first
+            headroom_aligned = demand_df[['timestamp_utc']].merge(
+                electricity_signals[['timestamp_utc', 'headroom_MW']],
+                on='timestamp_utc',
+                how='left'
+            )
+            # Canonicalize headroom timestamps to tz-aware UTC
+            headroom_ts_canonical = _canonicalize_timestamps(headroom_aligned['timestamp_utc'])
+            # Create Series with DatetimeIndex (ensure it's a DatetimeIndex, not just the values)
+            if isinstance(headroom_ts_canonical, pd.Series):
+                headroom_ts_index = pd.DatetimeIndex(headroom_ts_canonical.values, tz='UTC')
+            else:
+                headroom_ts_index = pd.DatetimeIndex(headroom_ts_canonical, tz='UTC')
+            headroom_by_ts = pd.Series(
+                headroom_aligned['headroom_MW'].values,
+                index=headroom_ts_index
+            )
+            
+            # Ensure demand_ts_canonical is also properly canonicalized (should already be, but ensure)
+            # demand_ts_canonical is already a DatetimeIndex from earlier validation, but ensure it's UTC
+            if isinstance(demand_ts_canonical, pd.DatetimeIndex):
+                if demand_ts_canonical.tz is None:
+                    demand_ts_canonical_normalized = demand_ts_canonical.tz_localize('UTC')
+                else:
+                    demand_ts_canonical_normalized = demand_ts_canonical.tz_convert('UTC')
+            else:
+                # If it's not a DatetimeIndex, canonicalize it
+                demand_ts_canonical_normalized = pd.DatetimeIndex(_canonicalize_timestamps(pd.Series(demand_ts_canonical)).values, tz='UTC')
+            
+            # Optional debug: print timezone info if env var set
+            if os.environ.get("DISPATCH_DEBUG_VALIDATE", "0") == "1":
+                print(f"[DEBUG] Headroom validation timezone info:")
+                print(f"  elec_by_ts.index.tz: {elec_by_ts.index.tz}")
+                print(f"  headroom_by_ts.index.tz: {headroom_by_ts.index.tz}")
+                print(f"  demand_ts_canonical_normalized.tz: {demand_ts_canonical_normalized.tz}")
+                print(f"  elec_by_ts.index.dtype: {elec_by_ts.index.dtype}")
+                print(f"  headroom_by_ts.index.dtype: {headroom_by_ts.index.dtype}")
+                print(f"  demand_ts_canonical_normalized.dtype: {demand_ts_canonical_normalized.dtype}")
+            
+            # Check headroom constraint - all indices are now tz-aware UTC DatetimeIndex
+            headroom_violations = (elec_by_ts - headroom_by_ts).reindex(demand_ts_canonical_normalized, fill_value=0.0)
+            max_violation = headroom_violations.max()
+            tol = 1e-6  # MW
+            if max_violation > tol:
+                max_violation_ts = headroom_violations.idxmax()
+                # Use reindex to safely access values by timestamp
+                elec_val = elec_by_ts.reindex([max_violation_ts], fill_value=0.0).iloc[0]
+                headroom_val = headroom_by_ts.reindex([max_violation_ts], fill_value=0.0).iloc[0]
+                raise ValueError(
+                    f"[VALIDATION FAILURE] Headroom constraint violation at {max_violation_ts}: "
+                    f"incremental_electricity={elec_val:.6f} MW, "
+                    f"headroom={headroom_val:.6f} MW, "
+                    f"violation={max_violation:.6f} MW. "
+                    f"Tolerance: {tol} MW. This is a hard failure - electricity consumption must not exceed headroom."
+                )
+            print(f"[OK] Headroom constraint validated: max incremental electricity within headroom (tolerance: {tol} MW)")
+    
+    # 6. Maintenance validation (if maintenance_availability provided)
+    if maintenance_availability is not None:
+        # Check that units with availability_multiplier == 0 have heat_MW == 0
+        maint_merged = dispatch_long.merge(
+            maintenance_availability,
+            on=['timestamp_utc', 'unit_id'],
+            how='left'
+        )
+        maint_merged['availability_multiplier'] = maint_merged['availability_multiplier'].fillna(1.0)
+        
+        outage_mask = maint_merged['availability_multiplier'] == 0.0
+        if outage_mask.any():
+            tol = 1e-6  # MW
+            violations = maint_merged[outage_mask & (maint_merged['heat_MW'].abs() > tol)]
+            if len(violations) > 0:
+                violation_samples = violations[['timestamp_utc', 'unit_id', 'heat_MW', 'availability_multiplier']].head(5)
+                raise ValueError(
+                    f"[VALIDATION FAILURE] Maintenance constraint violation: {len(violations)} timestamps with non-zero dispatch during outages. "
+                    f"Tolerance: {tol} MW. This is a hard failure - units must have zero dispatch when availability_multiplier == 0. "
+                    f"Sample violations:\n{violation_samples}"
+                )
+            print(f"[OK] Maintenance constraints validated: {outage_mask.sum()} outage hours, all units at zero dispatch (tolerance: {tol} MW)")
 
 
 def _debug_validate_summary_schema(summary: pd.DataFrame) -> None:
@@ -2582,7 +3308,8 @@ def _self_test_lightweight():
     
     # Add costs before validation (required for schema consistency)
     dispatch_long = add_costs_to_dispatch(dispatch_long, util_df, signals, dt_h)
-    validate_dispatch_outputs(dispatch_long, dispatch_wide, demand_slice, dt_h)
+    validate_dispatch_outputs(dispatch_long, dispatch_wide, demand_slice, dt_h,
+                               electricity_signals=None, maintenance_availability=None, util_df=util_df)
     print("[OK] Proportional dispatch validation passed")
     
     # Test 3: Optimal subset mode (first 48 hours)
@@ -2600,7 +3327,8 @@ def _self_test_lightweight():
     )
     # Ensure costs are added (for schema consistency, even though optimal_subset already has costs)
     dispatch_long_opt = add_costs_to_dispatch(dispatch_long_opt, util_df, signals, dt_h)
-    validate_dispatch_outputs(dispatch_long_opt, dispatch_wide_opt, demand_slice, dt_h)
+    validate_dispatch_outputs(dispatch_long_opt, dispatch_wide_opt, demand_slice, dt_h,
+                               electricity_signals=None, maintenance_availability=None, util_df=util_df)
     print("[OK] Optimal subset dispatch validation passed")
     
     print("\n" + "="*60)

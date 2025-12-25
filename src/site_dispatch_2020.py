@@ -26,6 +26,79 @@ from src.path_utils import repo_root, resolve_path, resolve_cfg_path, input_root
 from src.load_signals import load_signals_config, get_signals_for_epoch, map_eval_epoch_to_signals_epoch
 from src.time_utils import parse_any_timestamp, to_iso_z
 import src.maintenance_utils as maint
+import re
+
+
+def parse_epoch_tag(epoch_str: str) -> tuple[int, str, Optional[str]]:
+    """
+    Parse epoch string into eval_year, epoch_tag, and variant.
+    
+    Supports:
+    - Pure year: "2020", "2025", "2028", "2035" -> (2020, "2020", None)
+    - Year + variant: "2035_EB", "2035_BB" -> (2035, "2035_EB", "EB")
+    
+    Args:
+        epoch_str: Epoch string (e.g., "2020", "2035_EB")
+        
+    Returns:
+        Tuple of (eval_year: int, epoch_tag: str, variant: Optional[str])
+        
+    Raises:
+        ValueError: If epoch_str format is invalid
+    """
+    epoch_str = str(epoch_str).strip()
+    
+    # Match year_variant pattern (e.g., "2035_EB")
+    variant_match = re.match(r'^(\d+)_(\w+)$', epoch_str)
+    if variant_match:
+        eval_year = int(variant_match.group(1))
+        variant = variant_match.group(2)
+        epoch_tag = epoch_str  # Keep full tag for outputs
+        return eval_year, epoch_tag, variant
+    
+    # Match pure year pattern (e.g., "2020")
+    year_match = re.match(r'^(\d+)$', epoch_str)
+    if year_match:
+        eval_year = int(year_match.group(1))
+        epoch_tag = epoch_str
+        variant = None
+        return eval_year, epoch_tag, variant
+    
+    raise ValueError(f"Invalid epoch format: {epoch_str}. Expected format: 'YYYY' or 'YYYY_VARIANT' (e.g., '2020' or '2035_EB')")
+
+
+def resolve_maintenance_csv(repo_root: Path, eval_year: int, variant: Optional[str]) -> Optional[Path]:
+    """
+    Resolve maintenance CSV path for an epoch with variant support.
+    
+    Lookup order:
+    1. If variant is not None: try maintenance_windows_{eval_year}_{variant}.csv
+    2. Try canonical: maintenance_windows_{eval_year}.csv
+    3. If not found: return None (maintenance OFF)
+    
+    Args:
+        repo_root: Repository root directory
+        eval_year: Evaluation year (e.g., 2035)
+        variant: Optional variant string (e.g., "EB", "BB")
+        
+    Returns:
+        Path to maintenance CSV if found, else None
+    """
+    maint_dir = repo_root / "Input" / "site" / "maintenance"
+    
+    # Try variant-specific first if variant provided
+    if variant:
+        variant_path = maint_dir / f"maintenance_windows_{eval_year}_{variant}.csv"
+        if variant_path.exists():
+            return variant_path
+    
+    # Try canonical
+    canonical_path = maint_dir / f"maintenance_windows_{eval_year}.csv"
+    if canonical_path.exists():
+        return canonical_path
+    
+    # Not found
+    return None
 
 
 def load_hourly_demand(path: str) -> Tuple[pd.DataFrame, float]:
@@ -2721,7 +2794,7 @@ def plot_unit_utilisation_duration(dispatch_long_path: str, output_path: str,
     print(f"[OK] Saved {output_path}")
 
 
-def resolve_demand_csv(repo_root: Path, epoch: int, demand_csv_arg: Optional[str] = None) -> Path:
+def resolve_demand_csv(repo_root: Path, epoch_tag: str, demand_csv_arg: Optional[str] = None) -> Path:
     """
     Resolve demand CSV path for an epoch.
     
@@ -2756,38 +2829,39 @@ def resolve_demand_csv(repo_root: Path, epoch: int, demand_csv_arg: Optional[str
     if runs_dir.exists():
         # Find most recent run folder that matches epoch pattern
         epoch_runs = sorted(
-            [d for d in runs_dir.iterdir() if d.is_dir() and f'epoch{epoch}' in d.name],
+            [d for d in runs_dir.iterdir() if d.is_dir() and f'epoch{epoch_tag}' in d.name],
             key=lambda p: p.stat().st_mtime,
             reverse=True
         )
         if epoch_runs:
-            candidate = epoch_runs[0] / 'demandpack' / f'hourly_heat_demand_{epoch}.csv'
+            candidate = epoch_runs[0] / 'demandpack' / f'hourly_heat_demand_{epoch_tag}.csv'
             if candidate.exists():
                 return candidate
     
     # Try 3: Direct Output root
-    candidate = output_root / f'hourly_heat_demand_{epoch}.csv'
+    candidate = output_root / f'hourly_heat_demand_{epoch_tag}.csv'
     if candidate.exists():
         return candidate
     
     # Not found - error with helpful message
     attempted = [
-        f"  - Output/runs/*/demandpack/hourly_heat_demand_{epoch}.csv (latest run)",
-        f"  - Output/hourly_heat_demand_{epoch}.csv"
+        f"  - Output/runs/*/demandpack/hourly_heat_demand_{epoch_tag}.csv (latest run)",
+        f"  - Output/hourly_heat_demand_{epoch_tag}.csv"
     ]
     raise FileNotFoundError(
-        f"Demand CSV not found for epoch {epoch}.\n"
+        f"Demand CSV not found for epoch {epoch_tag}.\n"
         f"Attempted paths:\n" + "\n".join(attempted) + "\n"
         f"Please provide --demand-csv or ensure demand file exists."
     )
 
 
 def validate_maintenance_only(
-    epoch: int,
+    eval_year: int,
+    epoch_tag: str,
+    variant: Optional[str],
     demand_csv_path: Path,
     utilities_csv_path: Path,
-    repo_root: Path,
-    variant: Optional[str] = None
+    repo_root: Path
 ) -> int:
     """
     Validate maintenance windows without running dispatch.
@@ -2803,7 +2877,9 @@ def validate_maintenance_only(
         Exit code: 0 for PASS, 2 for FAIL, 1 for ERROR
     """
     print("\n" + "=" * 80)
-    print(f"VALIDATION MODE: Checking maintenance windows for epoch {epoch}")
+    print(f"VALIDATION MODE: Checking maintenance windows for epoch {epoch_tag}")
+    if variant:
+        print(f"  Eval year: {eval_year}, Variant: {variant}")
     print("=" * 80)
     
     # Load demand timestamps
@@ -2823,7 +2899,7 @@ def validate_maintenance_only(
     # Load utilities
     print(f"\n[2/3] Loading utilities from {utilities_csv_path}...")
     try:
-        util_df = load_utilities(str(utilities_csv_path), epoch=epoch)
+        util_df = load_utilities(str(utilities_csv_path), epoch=eval_year)
         unit_ids = util_df['unit_id'].tolist()
         print(f"[OK] Loaded {len(unit_ids)} units: {', '.join(unit_ids)}")
     except Exception as e:
@@ -2833,14 +2909,20 @@ def validate_maintenance_only(
     # Load maintenance windows
     print(f"\n[3/3] Loading maintenance windows...")
     try:
-        maint_df = maint.load_maintenance_windows(repo_root, epoch, variant=variant)
+        maint_df = maint.load_maintenance_windows(repo_root, eval_year, variant=variant)
     except Exception as e:
         print(f"[ERROR] Failed to load maintenance windows: {e}")
         return 1
     
     if len(maint_df) == 0:
-        print(f"[INFO] No maintenance windows found for epoch {epoch}")
-        print(f"  Expected: Input/site/maintenance/maintenance_windows_{epoch}.csv")
+        print(f"[INFO] No maintenance windows found for epoch {epoch_tag}")
+        attempted = []
+        if variant:
+            attempted.append(f"  - Input/site/maintenance/maintenance_windows_{eval_year}_{variant}.csv")
+        attempted.append(f"  - Input/site/maintenance/maintenance_windows_{eval_year}.csv")
+        print("Attempted paths:")
+        for path in attempted:
+            print(path)
         print(f"[PASS] No maintenance to validate")
         return 0
     
@@ -2964,8 +3046,8 @@ def main():
                        help='Generate dispatch plots')
     parser.add_argument('--signals-config', default=None,
                        help='Path to signals config TOML file (default: Input/signals/signals_config.toml)')
-    parser.add_argument('--epoch', type=int, default=2020,
-                       help='Epoch year (default: 2020)')
+    parser.add_argument('--epoch', type=str, default='2020',
+                       help='Epoch year or variant (default: 2020). Supports: "2020", "2025", "2028", "2035", "2035_EB", "2035_BB")')
     parser.add_argument('--output-dir', type=str, default=None,
                        help='Output directory (deprecated: use --output-root and --run-id)')
     parser.add_argument('--output-root', type=str, default=None,
@@ -2991,56 +3073,91 @@ def main():
 
     args = parser.parse_args()
     
-    epoch = args.epoch
+    # Parse epoch string into eval_year, epoch_tag, and variant
+    try:
+        eval_year, epoch_tag, variant = parse_epoch_tag(args.epoch)
+    except ValueError as e:
+        print(f"[ERROR] {e}")
+        sys.exit(1)
+    
+    # Define canonical epoch_label for output filenames (preserves variant tags like "2035_EB")
+    epoch_label = str(args.epoch).strip()
+    assert isinstance(epoch_label, str) and len(epoch_label) > 0, \
+        f"epoch_label must be a non-empty string, got: {epoch_label!r}"
     
     # Resolve paths
     ROOT = repo_root()
     INPUT_DIR = input_root()
     
     print(f"Repository root: {ROOT}")
-    print(f"Epoch: {epoch}")
+    print(f"Epoch tag: {epoch_tag}")
+    print(f"Epoch label: {epoch_label}")
+    print(f"Eval year: {eval_year}")
+    if variant:
+        print(f"Variant: {variant}")
     
     # Handle validate-maintenance mode early (exit before any dispatch/output code)
     if args.validate_maintenance:
         # Resolve demand CSV (epoch-aware)
         try:
-            demand_csv_resolved = resolve_demand_csv(ROOT, epoch, args.demand_csv)
+            demand_csv_resolved = resolve_demand_csv(ROOT, epoch_tag, args.demand_csv)
         except FileNotFoundError as e:
             print(f"[ERROR] {e}")
             sys.exit(1)
         
-        # Resolve utilities CSV (use existing auto-discovery logic)
+        # Resolve utilities CSV (variant-aware)
         if args.utilities_csv:
             utilities_csv_resolved = resolve_path(args.utilities_csv)
         else:
-            # Auto-discovery
+            # Auto-discovery with variant support
             utilities_csv_resolved = None
-            candidate = INPUT_DIR / 'site' / 'utilities' / f'site_utilities_{epoch}.csv'
-            if candidate.exists():
-                utilities_csv_resolved = candidate
-            else:
-                utilities_dir = INPUT_DIR / 'site' / 'utilities'
-                if utilities_dir.exists():
-                    matches = sorted(utilities_dir.glob(f'*utilities*{epoch}*.csv'))
-                    if len(matches) == 1:
-                        utilities_csv_resolved = matches[0]
-                    elif len(matches) > 1:
-                        print(f"[ERROR] Multiple utilities CSV files found for epoch {epoch}:")
-                        for i, match in enumerate(matches, 1):
-                            print(f"  {i}. {match.name}")
-                        print(f"\nPlease specify one using --utilities-csv")
-                        sys.exit(1)
+            utilities_dir = INPUT_DIR / 'site' / 'utilities'
+            
+            # Try variant-specific first if variant exists
+            if variant:
+                variant_candidate = utilities_dir / f'site_utilities_{eval_year}_{variant}.csv'
+                if variant_candidate.exists():
+                    utilities_csv_resolved = variant_candidate
+            
+            # Try canonical if variant not found
+            if utilities_csv_resolved is None:
+                candidate = utilities_dir / f'site_utilities_{eval_year}.csv'
+                if candidate.exists():
+                    utilities_csv_resolved = candidate
+            
+            # Fallback: glob search
+            if utilities_csv_resolved is None and utilities_dir.exists():
+                matches = sorted(utilities_dir.glob(f'*utilities*{eval_year}*.csv'))
+                if len(matches) == 1:
+                    utilities_csv_resolved = matches[0]
+                elif len(matches) > 1:
+                    print(f"[ERROR] Multiple utilities CSV files found for epoch {epoch_tag}:")
+                    for i, match in enumerate(matches, 1):
+                        print(f"  {i}. {match.name}")
+                    print(f"\nPlease specify one using --utilities-csv")
+                    sys.exit(1)
         
         if utilities_csv_resolved is None or not utilities_csv_resolved.exists():
-            print(f"[ERROR] Utilities CSV not found for epoch {epoch}")
-            print(f"  Expected: Input/site/utilities/site_utilities_{epoch}.csv")
+            print(f"[ERROR] Utilities CSV not found for epoch {epoch_tag}")
+            if variant:
+                print(f"  Tried: Input/site/utilities/site_utilities_{eval_year}_{variant}.csv")
+            print(f"  Tried: Input/site/utilities/site_utilities_{eval_year}.csv")
             print(f"  Please specify using --utilities-csv")
             sys.exit(1)
         
-        # Determine variant for 2035
-        variant = None
-        if epoch == 2035 and args.utilities_csv:
-            util_path_str = str(args.utilities_csv)
+        # Resolve maintenance CSV (variant-aware)
+        maint_csv_path = resolve_maintenance_csv(ROOT, eval_year, variant)
+        if maint_csv_path is None:
+            print(f"[ERROR] Maintenance CSV not found for epoch {epoch_tag}")
+            attempted = []
+            if variant:
+                attempted.append(f"  - Input/site/maintenance/maintenance_windows_{eval_year}_{variant}.csv")
+            attempted.append(f"  - Input/site/maintenance/maintenance_windows_{eval_year}.csv")
+            print("Attempted paths:")
+            for path in attempted:
+                print(path)
+            print("\nIn --validate-maintenance mode, maintenance file is required.")
+            sys.exit(1)
             if '_EB' in util_path_str:
                 variant = 'EB'
             elif '_BB' in util_path_str:
@@ -3048,11 +3165,12 @@ def main():
         
         # Run validation and exit
         exit_code = validate_maintenance_only(
-            epoch=epoch,
+            eval_year=eval_year,
+            epoch_tag=epoch_tag,
+            variant=variant,
             demand_csv_path=demand_csv_resolved,
             utilities_csv_path=utilities_csv_resolved,
-            repo_root=ROOT,
-            variant=variant
+            repo_root=ROOT
         )
         sys.exit(exit_code)
     
@@ -3073,7 +3191,7 @@ def main():
         
         output_paths = resolve_run_paths(
             output_root=output_root,
-            epoch=epoch,
+            epoch=eval_year,  # Use eval_year for run path resolution (backward compatible)
             config_path=config_path,
             run_id=args.run_id
         )
@@ -3092,22 +3210,22 @@ def main():
     # Set default output paths based on mode (epoch-tagged)
     if args.out_dispatch_long is None:
         if args.mode == 'proportional':
-            args.out_dispatch_long = str(output_dir / f'site_dispatch_{epoch}_long.csv')
+            args.out_dispatch_long = str(output_dir / f'site_dispatch_{epoch_label}_long.csv')
         else:
-            args.out_dispatch_long = str(output_dir / f'site_dispatch_{epoch}_long_costed_opt.csv')
+            args.out_dispatch_long = str(output_dir / f'site_dispatch_{epoch_label}_long_costed_opt.csv')
     
     if args.out_dispatch_wide is None:
         if args.mode == 'proportional':
-            args.out_dispatch_wide = str(output_dir / f'site_dispatch_{epoch}_wide.csv')
+            args.out_dispatch_wide = str(output_dir / f'site_dispatch_{epoch_label}_wide.csv')
         else:
-            args.out_dispatch_wide = str(output_dir / f'site_dispatch_{epoch}_wide_opt.csv')
+            args.out_dispatch_wide = str(output_dir / f'site_dispatch_{epoch_label}_wide_opt.csv')
     
     # Resolve input paths
     if args.demand_csv:
         demand_csv_resolved = resolve_path(args.demand_csv)
     else:
         # Auto-discover demand CSV for this epoch
-        demand_csv_resolved = resolve_demand_csv(ROOT, epoch, None)
+        demand_csv_resolved = resolve_demand_csv(ROOT, epoch_tag, None)
     
     # Resolve utilities CSV with auto-discovery
     if args.utilities_csv:
@@ -3149,25 +3267,32 @@ def main():
                     # Silently fail - config might not have utilities path
                     pass
         
-        # Try b) <input_dir>/site/utilities/site_utilities_{epoch}.csv (epoch-aware)
+        # Try b) Variant-specific first (if variant exists)
+        if utilities_csv_resolved is None and variant:
+            variant_candidate = INPUT_DIR / 'site' / 'utilities' / f'site_utilities_{eval_year}_{variant}.csv'
+            attempted_paths.append(f"  b) Variant-specific location: {variant_candidate}")
+            if variant_candidate.exists():
+                utilities_csv_resolved = variant_candidate
+        
+        # Try c) Canonical epoch-specific location
         if utilities_csv_resolved is None:
-            candidate = INPUT_DIR / 'site' / 'utilities' / f'site_utilities_{epoch}.csv'
-            attempted_paths.append(f"  b) Epoch-specific location: {candidate}")
+            candidate = INPUT_DIR / 'site' / 'utilities' / f'site_utilities_{eval_year}.csv'
+            attempted_paths.append(f"  c) Epoch-specific location: {candidate}")
             if candidate.exists():
                 utilities_csv_resolved = candidate
         
-        # Try c) Search <input_dir>/site/utilities/ for *utilities*{epoch}*.csv (epoch-aware)
+        # Try d) Search <input_dir>/site/utilities/ for *utilities*{eval_year}*.csv (epoch-aware)
         if utilities_csv_resolved is None:
             utilities_dir = INPUT_DIR / 'site' / 'utilities'
             if utilities_dir.exists():
-                matches = sorted(utilities_dir.glob(f'*utilities*{epoch}*.csv'))
-                attempted_paths.append(f"  c) Searched in: {utilities_dir} (pattern: *utilities*{epoch}*.csv)")
+                matches = sorted(utilities_dir.glob(f'*utilities*{eval_year}*.csv'))
+                attempted_paths.append(f"  d) Searched in: {utilities_dir} (pattern: *utilities*{eval_year}*.csv)")
                 if len(matches) == 1:
                     utilities_csv_resolved = matches[0]
                     attempted_paths.append(f"     Found: {utilities_csv_resolved}")
                 elif len(matches) > 1:
                     # Multiple matches - list them
-                    print(f"[ERROR] Multiple utilities CSV files found for epoch {epoch} in {utilities_dir}:")
+                    print(f"[ERROR] Multiple utilities CSV files found for epoch {epoch_tag} in {utilities_dir}:")
                     print("Please specify one using --utilities-csv")
                     print()
                     for i, match in enumerate(matches, 1):
@@ -3183,7 +3308,7 @@ def main():
                 master_candidates = sorted(utilities_dir.glob('site_utilities.csv'))
                 if len(master_candidates) == 1:
                     utilities_csv_resolved = master_candidates[0]
-                    attempted_paths.append(f"  d) Fallback master file: {utilities_csv_resolved}")
+                    attempted_paths.append(f"  e) Fallback master file: {utilities_csv_resolved}")
                     print(f"[WARN] Using master utilities file (not epoch-specific): {utilities_csv_resolved}")
         
         # If still not found, show error with all attempted paths
@@ -3225,7 +3350,7 @@ def main():
     # Apply time window filtering if requested
     if args.smoke_maintenance:
         # Auto-discover maintenance file to find first availability==0 window
-        maint_df = maint.load_maintenance_windows(ROOT, epoch, variant=None)
+        maint_df = maint.load_maintenance_windows(ROOT, eval_year, variant=variant)
         if len(maint_df) > 0:
             # Find first window with availability==0
             zero_avail = maint_df[maint_df['availability'] == 0.0]
@@ -3289,18 +3414,18 @@ def main():
             sys.exit(1)
     
     print(f"Loading utilities from {utilities_csv_resolved}...")
-    util_df = load_utilities(str(utilities_csv_resolved), epoch=epoch)
+    util_df = load_utilities(str(utilities_csv_resolved), epoch=eval_year)
     
     print(f"Found {len(util_df)} utilities with total capacity {util_df['max_heat_MW'].sum():.2f} MW")
     
     # Load signals for the epoch (with epoch mapping)
-    print(f"Loading signals for epoch '{epoch}' from {signals_config_resolved}...")
+    print(f"Loading signals for epoch '{epoch_label}' from {signals_config_resolved}...")
     signals_config = load_signals_config(str(signals_config_resolved))
     
     # Map eval_epoch to signals_epoch (handles cases where exact epoch not available)
-    signals_epoch = map_eval_epoch_to_signals_epoch(epoch, signals_config, INPUT_DIR)
-    if signals_epoch != epoch:
-        print(f"[WARN] Epoch mapping: eval_epoch {epoch} -> signals_epoch {signals_epoch}")
+    signals_epoch = map_eval_epoch_to_signals_epoch(eval_year, signals_config, INPUT_DIR)
+    if signals_epoch != eval_year:
+        print(f"[WARN] Epoch mapping: eval_epoch_tag {epoch_tag} (year {eval_year}) -> signals_epoch {signals_epoch}")
     signals = get_signals_for_epoch(signals_config, str(signals_epoch))
     
     # Load maintenance windows using new module (epoch-aware)
@@ -3308,8 +3433,8 @@ def main():
     maintenance_availability_wide = None  # Wide-form for dispatch functions
     
     # Determine variant for 2035 (extract from utilities CSV path if present)
-    variant = None
-    if epoch == 2035 and args.utilities_csv:
+    # Note: variant is already set from parse_epoch_tag, but this preserves backward compatibility
+    if eval_year == 2035 and args.utilities_csv and variant is None:
         util_path_str = str(args.utilities_csv)
         if '_EB' in util_path_str:
             variant = 'EB'
@@ -3318,7 +3443,7 @@ def main():
     
     # Load maintenance windows
     try:
-        maint_df = maint.load_maintenance_windows(ROOT, epoch, variant=variant)
+        maint_df = maint.load_maintenance_windows(ROOT, eval_year, variant=variant)
         
         if len(maint_df) > 0:
             # Convert demand timestamps to DatetimeIndex
@@ -3359,7 +3484,7 @@ def main():
             else:
                 print(f"[WARN] Maintenance windows loaded but no units have availability < 1.0 (check unit_id matching)")
         else:
-            print(f"[INFO] Maintenance windows not found for epoch {epoch}; continuing without maintenance constraints")
+            print(f"[INFO] Maintenance windows not found for epoch {epoch_label}; continuing without maintenance constraints")
     except Exception as e:
         print(f"[WARN] Failed to load maintenance windows: {e}")
         print(f"[INFO] Continuing without maintenance constraints")
@@ -3521,7 +3646,7 @@ def main():
     
     # For proportional mode, also save costed version
     if args.mode == 'proportional':
-        costed_path = str(output_dir / f'site_dispatch_{epoch}_long_costed.csv')
+        costed_path = str(output_dir / f'site_dispatch_{epoch_label}_long_costed.csv')
         print(f"Saving costed long-form dispatch to {costed_path}...")
         dispatch_long_for_csv.to_csv(costed_path, index=False)
     
@@ -3538,13 +3663,13 @@ def main():
         if args.run_id and args.output_root:
             output_root = Path(args.output_root)
             signals_dir = output_root / 'runs' / args.run_id / 'signals'
-            elec_export_path = signals_dir / f'incremental_electricity_MW_{epoch}.csv'
+            elec_export_path = signals_dir / f'incremental_electricity_MW_{epoch_label}.csv'
         elif args.output_dir:
             signals_dir = Path(args.output_dir) / 'signals'
-            elec_export_path = signals_dir / f'incremental_electricity_MW_{epoch}.csv'
+            elec_export_path = signals_dir / f'incremental_electricity_MW_{epoch_label}.csv'
         else:
-            signals_dir = OUTPUT_DIR / 'signals'
-            elec_export_path = signals_dir / f'incremental_electricity_MW_{epoch}.csv'
+            signals_dir = ROOT / 'Output' / 'signals'
+            elec_export_path = signals_dir / f'incremental_electricity_MW_{epoch_label}.csv'
         
         export_incremental_electricity(dispatch_long, util_df, demand_df, elec_export_path)
     
@@ -3580,9 +3705,9 @@ def main():
     
     # Save summary CSV (epoch-tagged)
     if args.mode == 'proportional':
-        summary_path = str(output_dir / f'site_dispatch_{epoch}_summary.csv')
+        summary_path = str(output_dir / f'site_dispatch_{epoch_label}_summary.csv')
     else:
-        summary_path = str(output_dir / f'site_dispatch_{epoch}_summary_opt.csv')
+        summary_path = str(output_dir / f'site_dispatch_{epoch_label}_summary_opt.csv')
     
     # Outputs are written directly to run_dir (no copying to latest)
     print(f"Saving annual summary to {summary_path}...")
@@ -3811,54 +3936,54 @@ def main():
         
         try:
             if args.mode == 'proportional':
-                plot_path = figures_dir / f'heat_{epoch}_unit_stack.png'
-                plot_dispatch_stack(args.out_dispatch_wide, str(plot_path), demand_df, epoch=epoch)
+                plot_path = figures_dir / f'heat_{epoch_label}_unit_stack.png'
+                plot_dispatch_stack(args.out_dispatch_wide, str(plot_path), demand_df, epoch=eval_year)
             elif args.mode == 'lp':
                 # LP mode: same plots as optimal_subset
                 # Stack plot
-                plot_path = figures_dir / f'heat_{epoch}_unit_stack_opt.png'
+                plot_path = figures_dir / f'heat_{epoch_label}_unit_stack_opt.png'
                 try:
-                    plot_dispatch_stack(args.out_dispatch_wide, str(plot_path), demand_df, epoch=epoch)
+                    plot_dispatch_stack(args.out_dispatch_wide, str(plot_path), demand_df, epoch=eval_year)
                 except Exception as e:
                     print(f"[WARN] Stack plot failed: {e}")
                     plot_success = False
                 
                 # Units online plot
-                plot_path = figures_dir / f'heat_{epoch}_units_online_opt.png'
+                plot_path = figures_dir / f'heat_{epoch_label}_units_online_opt.png'
                 try:
-                    plot_units_online(args.out_dispatch_long, str(plot_path), epoch=epoch)
+                    plot_units_online(args.out_dispatch_long, str(plot_path), epoch=eval_year)
                 except Exception as e:
                     print(f"[WARN] Units online plot failed: {e}")
                     plot_success = False
                 
                 # Utilisation duration plot
-                plot_path = figures_dir / f'heat_{epoch}_unit_utilisation_duration_opt.png'
+                plot_path = figures_dir / f'heat_{epoch_label}_unit_utilisation_duration_opt.png'
                 try:
-                    plot_unit_utilisation_duration(args.out_dispatch_long, str(plot_path), str(utilities_csv_resolved), epoch=epoch)
+                    plot_unit_utilisation_duration(args.out_dispatch_long, str(plot_path), str(utilities_csv_resolved), epoch=eval_year)
                 except Exception as e:
                     print(f"[WARN] Utilisation duration plot failed: {e}")
                     plot_success = False
             else:  # optimal_subset
                 # Stack plot
-                plot_path = figures_dir / f'heat_{epoch}_unit_stack_opt.png'
+                plot_path = figures_dir / f'heat_{epoch_label}_unit_stack_opt.png'
                 try:
-                    plot_dispatch_stack(args.out_dispatch_wide, str(plot_path), demand_df, epoch=epoch)
+                    plot_dispatch_stack(args.out_dispatch_wide, str(plot_path), demand_df, epoch=eval_year)
                 except Exception as e:
                     print(f"[WARN] Stack plot failed: {e}")
                     plot_success = False
                 
                 # Units online plot
-                plot_path = figures_dir / f'heat_{epoch}_units_online_opt.png'
+                plot_path = figures_dir / f'heat_{epoch_label}_units_online_opt.png'
                 try:
-                    plot_units_online(args.out_dispatch_long, str(plot_path), epoch=epoch)
+                    plot_units_online(args.out_dispatch_long, str(plot_path), epoch=eval_year)
                 except Exception as e:
                     print(f"[WARN] Units online plot failed: {e}")
                     plot_success = False
                 
                 # Utilisation duration plot
-                plot_path = figures_dir / f'heat_{epoch}_unit_utilisation_duration_opt.png'
+                plot_path = figures_dir / f'heat_{epoch_label}_unit_utilisation_duration_opt.png'
                 try:
-                    plot_unit_utilisation_duration(args.out_dispatch_long, str(plot_path), str(utilities_csv_resolved), epoch=epoch)
+                    plot_unit_utilisation_duration(args.out_dispatch_long, str(plot_path), str(utilities_csv_resolved), epoch=eval_year)
                 except Exception as e:
                     print(f"[WARN] Utilisation duration plot failed: {e}")
                     plot_success = False

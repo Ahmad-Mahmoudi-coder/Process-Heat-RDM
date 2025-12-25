@@ -20,16 +20,18 @@ from src.path_utils import repo_root, input_root
 from src.time_utils import parse_any_timestamp
 
 
-def load_maintenance_windows(repo_root: Path, epoch: int, variant: Optional[str] = None) -> pd.DataFrame:
+def load_maintenance_windows(repo_root: Path, eval_year: int, variant: Optional[str] = None) -> pd.DataFrame:
     """
-    Load maintenance windows CSV for an epoch.
+    Load maintenance windows CSV for an epoch with variant support.
     
-    Looks for: Input/site/maintenance/maintenance_windows_{epoch}.csv
-    For 2035 variants: maintenance_windows_2035_{variant}.csv
+    Lookup order:
+    1. If variant is not None: try maintenance_windows_{eval_year}_{variant}.csv
+    2. Try canonical: maintenance_windows_{eval_year}.csv
+    3. If not found: return empty DataFrame (no maintenance)
     
     Args:
         repo_root: Repository root directory
-        epoch: Epoch year (e.g., 2020, 2025, 2028, 2035)
+        eval_year: Evaluation year (e.g., 2020, 2025, 2028, 2035)
         variant: Optional variant string (e.g., "EB", "BB" for 2035)
         
     Returns:
@@ -42,13 +44,22 @@ def load_maintenance_windows(repo_root: Path, epoch: int, variant: Optional[str]
     input_dir = repo_root / "Input"
     maint_dir = input_dir / "site" / "maintenance"
     
-    # Build filename
-    if epoch == 2035 and variant:
-        filename = f"maintenance_windows_2035_{variant}.csv"
-    else:
-        filename = f"maintenance_windows_{epoch}.csv"
+    # Try variant-specific first if variant provided
+    maint_path = None
+    if variant:
+        variant_path = maint_dir / f"maintenance_windows_{eval_year}_{variant}.csv"
+        if variant_path.exists():
+            maint_path = variant_path
     
-    maint_path = maint_dir / filename
+    # Try canonical if variant path not found
+    if maint_path is None:
+        canonical_path = maint_dir / f"maintenance_windows_{eval_year}.csv"
+        if canonical_path.exists():
+            maint_path = canonical_path
+    
+    # If still not found, return empty DataFrame
+    if maint_path is None:
+        return pd.DataFrame(columns=['unit_id', 'start_timestamp_utc', 'end_timestamp_utc', 'availability'])
     
     if not maint_path.exists():
         # Return empty DataFrame (no maintenance)
@@ -221,4 +232,8 @@ def build_availability_matrix(
         availability_df.loc[mask, unit_id] = np.minimum(availability_df.loc[mask, unit_id], avail)
     
     return availability_df
+
+
+
+
 

@@ -1,0 +1,38 @@
+# Grid Upgrade Options Configuration
+#
+# Defines discrete grid capacity upgrade options for the regional electricity module.
+# The module will choose the cheapest option that minimizes total cost:
+#   total_cost = upgrade_cost + shed_energy_MWh * VOLL
+#
+# Each upgrade option specifies:
+#   - capacity_MW: Additional headroom capacity (MW)
+#   - annual_cost_nzd: Annualized cost of the upgrade (NZD per year)
+#
+# The module prorates annual costs to hourly costs (divides by 8760 hours/year)
+# and compares against shedding costs (shed_MWh * VOLL).
+
+[[upgrades]]
+capacity_MW = 0
+annual_cost_nzd = 0.0
+# Default: no upgrade (baseline)
+
+[[upgrades]]
+capacity_MW = 10
+annual_cost_nzd = 50000.0
+# Example: 10 MW upgrade at $50k/year
+
+[[upgrades]]
+capacity_MW = 20
+annual_cost_nzd = 90000.0
+# Example: 20 MW upgrade at $90k/year
+
+[[upgrades]]
+capacity_MW = 30
+annual_cost_nzd = 120000.0
+# Example: 30 MW upgrade at $120k/year
+
+# Add more upgrade options as needed.
+# Options are automatically sorted by capacity_MW (ascending).
+# The module selects the option that minimizes total cost (upgrade + shed*VOLL).
+
+

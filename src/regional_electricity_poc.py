@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 import pandas as pd
 import numpy as np
 import argparse
+import tomllib
 
 # Try to import PyPSA (optional)
 try:
@@ -31,6 +32,7 @@ except ImportError:
     HAVE_PYPSA = False
 
 from src.time_utils import parse_any_timestamp, to_iso_z
+from src.path_utils import repo_root, input_root, resolve_path
 
 
 def load_gxp_hourly(gxp_csv_path: str, for_simple_engine: bool = False) -> pd.DataFrame:
@@ -168,8 +170,129 @@ def load_incremental_demand(incremental_path: str, gxp_timestamps: pd.Series,
 # load_tariff is no longer needed - tariff comes from GXP file
 
 
+def load_grid_upgrades(upgrades_config_path: str = None) -> list[dict]:
+    """
+    Load grid upgrade options from TOML config.
+    
+    Expected format in grid_upgrades.toml:
+    [[upgrades]]
+    capacity_MW = 0
+    annual_cost_nzd = 0.0
+    
+    [[upgrades]]
+    capacity_MW = 10
+    annual_cost_nzd = 50000.0
+    
+    Returns list of upgrade options sorted by capacity_MW (ascending).
+    """
+    if upgrades_config_path is None:
+        # Default to Input/signals/grid_upgrades.toml
+        upgrades_config_path = input_root() / 'signals' / 'grid_upgrades.toml'
+    else:
+        upgrades_config_path = resolve_path(upgrades_config_path)
+    
+    if not upgrades_config_path.exists():
+        # Return default: no upgrade option
+        return [{'capacity_MW': 0, 'annual_cost_nzd': 0.0}]
+    
+    with open(upgrades_config_path, 'rb') as f:
+        config = tomllib.load(f)
+    
+    upgrades = config.get('upgrades', [])
+    if not upgrades:
+        return [{'capacity_MW': 0, 'annual_cost_nzd': 0.0}]
+    
+    # Validate and sort by capacity
+    validated = []
+    for upgrade in upgrades:
+        if 'capacity_MW' not in upgrade or 'annual_cost_nzd' not in upgrade:
+            print(f"[WARN] Skipping invalid upgrade option: {upgrade}")
+            continue
+        validated.append({
+            'capacity_MW': float(upgrade['capacity_MW']),
+            'annual_cost_nzd': float(upgrade['annual_cost_nzd'])
+        })
+    
+    # Sort by capacity (ascending)
+    validated.sort(key=lambda x: x['capacity_MW'])
+    
+    # Ensure zero option exists
+    if validated[0]['capacity_MW'] != 0:
+        validated.insert(0, {'capacity_MW': 0, 'annual_cost_nzd': 0.0})
+    
+    return validated
+
+
+def choose_optimal_upgrade(incremental_demand_MW: float, headroom_MW: float,
+                           upgrade_options: list[dict], voll: float = 10000.0) -> dict:
+    """
+    Choose the cheapest upgrade option that minimizes total cost (upgrade + shed*VOLL).
+    
+    Args:
+        incremental_demand_MW: Incremental demand for this hour
+        headroom_MW: Available headroom before upgrade
+        upgrade_options: List of upgrade options (from load_grid_upgrades)
+        voll: Value of lost load (NZD per MWh)
+    
+    Returns:
+        dict with keys: upgrade_selected_MW, upgrade_annual_cost_nzd, headroom_effective_MW,
+                        shed_MW, total_cost_nzd
+    """
+    if incremental_demand_MW <= headroom_MW:
+        # No shed needed, no upgrade needed
+        return {
+            'upgrade_selected_MW': 0.0,
+            'upgrade_annual_cost_nzd': 0.0,
+            'headroom_effective_MW': headroom_MW,
+            'shed_MW': 0.0,
+            'total_cost_nzd': 0.0
+        }
+    
+    # Calculate shed without upgrade
+    shed_no_upgrade = incremental_demand_MW - headroom_MW
+    cost_no_upgrade = shed_no_upgrade * voll  # Per-hour cost (VOLL is per MWh)
+    
+    best_option = {
+        'upgrade_selected_MW': 0.0,
+        'upgrade_annual_cost_nzd': 0.0,
+        'headroom_effective_MW': headroom_MW,
+        'shed_MW': shed_no_upgrade,
+        'total_cost_nzd': cost_no_upgrade
+    }
+    
+    # Evaluate each upgrade option
+    for upgrade in upgrade_options:
+        upgrade_capacity = upgrade['capacity_MW']
+        upgrade_annual_cost = upgrade['annual_cost_nzd']
+        
+        # Effective headroom with this upgrade
+        headroom_effective = headroom_MW + upgrade_capacity
+        
+        # Shed with this upgrade
+        shed = max(0.0, incremental_demand_MW - headroom_effective)
+        
+        # Total cost: upgrade (prorated to hourly) + shed*VOLL
+        # Prorate annual cost to hourly (assume 8760 hours per year)
+        upgrade_hourly_cost = upgrade_annual_cost / 8760.0
+        shed_cost = shed * voll
+        total_cost = upgrade_hourly_cost + shed_cost
+        
+        # Choose option with lowest total cost
+        if total_cost < best_option['total_cost_nzd']:
+            best_option = {
+                'upgrade_selected_MW': upgrade_capacity,
+                'upgrade_annual_cost_nzd': upgrade_annual_cost,
+                'headroom_effective_MW': headroom_effective,
+                'shed_MW': shed,
+                'total_cost_nzd': total_cost
+            }
+    
+    return best_option
+
+
 def run_simple_engine(gxp_csv_path: str, incremental_path: str = None,
-                     output_path: str = None, epoch: str = '2020') -> pd.DataFrame:
+                     output_path: str = None, epoch: str = '2020',
+                     upgrades_config_path: str = None, voll: float = 10000.0) -> pd.DataFrame:
     """
     Run simple engine: direct calculation without PyPSA.
     
@@ -195,11 +318,34 @@ def run_simple_engine(gxp_csv_path: str, incremental_path: str = None,
     
     print(f"Processing {len(df)} hours with simple engine...")
     
-    # Simple dispatch logic
-    df['inc_served_mw'] = df[['incremental_demand_MW', 'headroom_mw']].min(axis=1)
-    df['shed_mw'] = (df['incremental_demand_MW'] - df['headroom_mw']).clip(lower=0.0)
+    # Load grid upgrade options if available
+    upgrade_options = load_grid_upgrades(upgrades_config_path)
+    if len(upgrade_options) > 1:
+        print(f"[INFO] Loaded {len(upgrade_options)} grid upgrade options")
+    else:
+        print(f"[INFO] No grid upgrade options configured (using default: no upgrade)")
+    
+    # Simple dispatch logic with upgrade selection
+    upgrade_results = []
+    for idx, row in df.iterrows():
+        result = choose_optimal_upgrade(
+            incremental_demand_MW=row['incremental_demand_MW'],
+            headroom_MW=row['headroom_mw'],
+            upgrade_options=upgrade_options,
+            voll=voll
+        )
+        upgrade_results.append(result)
+    
+    upgrade_df = pd.DataFrame(upgrade_results)
+    
+    # Use effective headroom (after upgrade) for dispatch
+    df['headroom_effective_mw'] = upgrade_df['headroom_effective_MW']
+    df['inc_served_mw'] = df[['incremental_demand_MW', 'headroom_effective_mw']].min(axis=1)
+    df['shed_mw'] = upgrade_df['shed_MW']
     df['grid_import_mw'] = df['baseline_import_MW'] + df['inc_served_mw']
-    df['headroom_remaining_mw'] = df['headroom_mw'] - df['inc_served_mw']
+    df['headroom_remaining_mw'] = df['headroom_effective_mw'] - df['inc_served_mw']
+    df['upgrade_selected_MW'] = upgrade_df['upgrade_selected_MW']
+    df['upgrade_annual_cost_nzd'] = upgrade_df['upgrade_annual_cost_nzd']
     df['tariff_effective_nzd_per_mwh'] = df['tariff_base_nzd_per_MWh']  # Simple: no VOLL pricing
     
     # Build output DataFrame
@@ -210,8 +356,11 @@ def run_simple_engine(gxp_csv_path: str, incremental_path: str = None,
         'incremental_demand_mw': df['incremental_demand_MW'],
         'grid_import_mw': df['grid_import_mw'],
         'shed_mw': df['shed_mw'],
-        'headroom_mw': df['headroom_mw'],
+        'headroom_mw': df['headroom_mw'],  # Original headroom (before upgrade)
+        'headroom_effective_MW': df['headroom_effective_mw'],  # After upgrade
         'headroom_remaining_mw': df['headroom_remaining_mw'],
+        'upgrade_selected_MW': df['upgrade_selected_MW'],
+        'upgrade_annual_cost_nzd': df['upgrade_annual_cost_nzd'],
         'tariff_nzd_per_mwh': df['tariff_base_nzd_per_MWh'],
         'tariff_effective_nzd_per_mwh': df['tariff_effective_nzd_per_mwh'],
         'capacity_mw': df['gxp_capacity_MW'],
@@ -225,15 +374,22 @@ def run_simple_engine(gxp_csv_path: str, incremental_path: str = None,
         output_df.to_csv(output_path, index=False)
     
     # Summary statistics
-    total_shed_mwh = df['shed_mw'].sum()
-    max_shed_mw = df['shed_mw'].max()
-    min_headroom_remaining_mw = df['headroom_remaining_mw'].min()
+    total_shed_mwh = output_df['shed_mw'].sum()
+    max_shed_mw = output_df['shed_mw'].max()
+    min_headroom_mw = output_df['headroom_mw'].min()
+    min_headroom_effective_mw = output_df['headroom_effective_MW'].min()
+    total_upgrade_cost_nzd = output_df['upgrade_annual_cost_nzd'].sum() / 8760.0 * len(output_df)  # Prorate to actual hours
+    hours_with_upgrade = (output_df['upgrade_selected_MW'] > 0).sum()
     
     print(f"[OK] Simple engine completed")
     print(f"  Total hours: {len(output_df)}")
     print(f"  Total shed: {total_shed_mwh:.2f} MWh")
     print(f"  Max shed: {max_shed_mw:.2f} MW")
-    print(f"  Min headroom remaining: {min_headroom_remaining_mw:.2f} MW")
+    print(f"  Min headroom (original): {min_headroom_mw:.2f} MW")
+    print(f"  Min headroom (effective, after upgrade): {min_headroom_effective_mw:.2f} MW")
+    if hours_with_upgrade > 0:
+        print(f"  Hours with upgrade selected: {hours_with_upgrade} ({100.0 * hours_with_upgrade / len(output_df):.1f}%)")
+        print(f"  Total upgrade cost (prorated): {total_upgrade_cost_nzd:.2f} NZD")
     if output_path:
         print(f"  Saved results to {output_path}")
     
@@ -433,7 +589,9 @@ def main():
     parser.add_argument('--engine', type=str, choices=['simple', 'pypsa'], default='simple',
                        help='Engine to use: simple (default, no PyPSA) or pypsa (requires PyPSA)')
     parser.add_argument('--voll', type=float, default=10000.0,
-                       help='Value of lost load (NZD per MWh) for shedding - PyPSA engine only (default: 10000.0)')
+                       help='Value of lost load (NZD per MWh) for shedding and upgrade decisions (default: 10000.0)')
+    parser.add_argument('--upgrades-config', type=str, default=None,
+                       help='Path to grid_upgrades.toml config (default: Input/signals/grid_upgrades.toml)')
     
     args = parser.parse_args()
     
@@ -450,7 +608,9 @@ def main():
                 gxp_csv_path=args.gxp_csv,
                 incremental_path=args.incremental,
                 output_path=args.out,
-                epoch=args.epoch
+                epoch=args.epoch,
+                upgrades_config_path=args.upgrades_config,
+                voll=args.voll
             )
         else:  # pypsa
             run_regional_poc_pypsa(

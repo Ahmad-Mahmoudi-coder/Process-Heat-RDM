@@ -459,7 +459,7 @@ Precedence rules for output paths:
             config_path=cfg_path,
             run_id=args.run_id
         )
-        
+    
         # Determine data path
         if args.data:
             data_path_resolved = resolve_path(args.data)
@@ -643,7 +643,7 @@ Precedence rules for output paths:
     
     if args.full_diagnostics:
         # Run full diagnostic suite - call main() directly
-        main()
+            main()
     else:
         # Simple mode: load data and generate two plots
         ROOT = repo_root()

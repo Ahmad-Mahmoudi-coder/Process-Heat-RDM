@@ -126,5 +126,3 @@ def resolve_cfg_path(cfg_path: Union[str, Path], p: Union[str, Path]) -> Path:
     
     # None exist: return the "best guess" (Input root) for error reporting
     return candidate2
-
-

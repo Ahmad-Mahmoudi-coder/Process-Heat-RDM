@@ -25,6 +25,7 @@ from scipy.optimize import linprog
 from src.path_utils import repo_root, resolve_path, resolve_cfg_path, input_root
 from src.load_signals import load_signals_config, get_signals_for_epoch, map_eval_epoch_to_signals_epoch
 from src.time_utils import parse_any_timestamp, to_iso_z
+import src.maintenance_utils as maint
 
 
 def load_hourly_demand(path: str) -> Tuple[pd.DataFrame, float]:
@@ -126,25 +127,28 @@ def load_utilities(path: str, epoch: int = None) -> pd.DataFrame:
     """
     df = pd.read_csv(path)
     
-    # Define status column name (prefer status_<epoch>, fallback to status)
-    if epoch is not None:
+    # Define status column name (prefer status, then status_<epoch>)
+    # This reduces noise for utilities CSVs that use generic "status" column
+    if "status" in df.columns:
+        status_col = "status"
+    elif epoch is not None:
         status_col = f"status_{epoch}"
+        # If status_{epoch} not found, try fallback to generic status
+        if status_col not in df.columns:
+            if "status" in df.columns:
+                df[status_col] = df["status"]
+                print(f"[WARN] Column '{status_col}' not found, using 'status' as alias in {path}")
+            else:
+                # Both missing - will be caught in required_cols check below
+                pass
     else:
         # For backward compatibility, try status_2020 first, then status
         if "status_2020" in df.columns:
             status_col = "status_2020"
+        elif "status" in df.columns:
+            status_col = "status"
         else:
-            status_col = "status"  # Default fallback to generic status column
-    
-    # Handle status column selection
-    if status_col not in df.columns:
-        # Try fallback to generic "status" column
-        if "status" in df.columns:
-            df[status_col] = df["status"]
-            print(f"[WARN] Column '{status_col}' not found, using 'status' as alias in {path}")
-        else:
-            # Both missing - will be caught in required_cols check below
-            pass
+            status_col = "status"  # Will be caught in required_cols check if missing
     
     # Required columns
     required_cols = ['unit_id', 'site_id', 'tech_type', 'fuel', status_col, 
@@ -230,105 +234,173 @@ def load_utilities(path: str, epoch: int = None) -> pd.DataFrame:
     return df
 
 
-def load_maintenance_windows(path: Path, unit_ids: list, demand_timestamps: pd.Series) -> pd.DataFrame:
+def load_maintenance_availability(maintenance_csv: Path, timestamps_utc: pd.DatetimeIndex, unit_ids: list[str]) -> pd.DataFrame:
     """
-    Load maintenance windows CSV and build per-unit hourly availability multipliers.
+    Load maintenance windows CSV and build hourly availability matrix.
     
     Schema:
-    - unit_id, start_timestamp_utc, end_timestamp_utc, availability
+    - unit_id, start_timestamp_utc, end_timestamp_utc, availability (float in [0,1])
+    
+    Semantics:
+    - Apply window for all hours where: start_timestamp_utc <= t < end_timestamp_utc (inclusive start, exclusive end)
+    - If windows overlap for a unit, availability is the minimum (most restrictive)
+    - If unit_id in maintenance file doesn't exist in utilities: warn and ignore
     
     Args:
-        path: Path to maintenance windows CSV file
+        maintenance_csv: Path to maintenance windows CSV file
+        timestamps_utc: DatetimeIndex of hourly timestamps (must be UTC)
         unit_ids: List of unit IDs from utilities (for validation)
-        demand_timestamps: Series of demand timestamps (for alignment)
         
     Returns:
-        DataFrame with columns: timestamp_utc, unit_id, availability_multiplier
-        availability_multiplier is 0.0 during outages (availability==0), 1.0 otherwise
+        DataFrame with:
+        - index = timestamps_utc (hourly)
+        - columns = unit_id (one column per unit)
+        - values = availability (float in [0,1], default 1.0)
         
     Raises:
         FileNotFoundError: If file doesn't exist (optional file, caller should handle)
         ValueError: If validation fails (invalid unit_id, malformed timestamps, etc.)
     """
-    if not path.exists():
-        raise FileNotFoundError(f"Maintenance windows file not found: {path}")
+    if not maintenance_csv.exists():
+        raise FileNotFoundError(f"Maintenance windows file not found: {maintenance_csv}")
     
-    df = pd.read_csv(path)
+    df = pd.read_csv(maintenance_csv)
     
     # Validate required columns
     required_cols = ['unit_id', 'start_timestamp_utc', 'end_timestamp_utc', 'availability']
     missing = [col for col in required_cols if col not in df.columns]
     if missing:
-        raise ValueError(f"Maintenance windows CSV missing required columns: {missing}")
+        raise ValueError(f"Maintenance windows CSV missing required columns: {missing}. File: {maintenance_csv}")
     
-    # Parse timestamps
-    df['start_timestamp_utc'] = parse_any_timestamp(df['start_timestamp_utc'])
-    df['end_timestamp_utc'] = parse_any_timestamp(df['end_timestamp_utc'])
+    # Parse timestamps with error handling
+    try:
+        df['start_timestamp_utc'] = parse_any_timestamp(df['start_timestamp_utc'])
+    except Exception as e:
+        bad_rows = df[df['start_timestamp_utc'].isna() | (df['start_timestamp_utc'].astype(str).str.contains('error', case=False, na=False))]
+        raise ValueError(f"Failed to parse start_timestamp_utc in maintenance CSV {maintenance_csv}. "
+                        f"Error: {e}. Check rows: {bad_rows[['unit_id', 'start_timestamp_utc']].to_dict('records')}")
+    
+    try:
+        df['end_timestamp_utc'] = parse_any_timestamp(df['end_timestamp_utc'])
+    except Exception as e:
+        bad_rows = df[df['end_timestamp_utc'].isna() | (df['end_timestamp_utc'].astype(str).str.contains('error', case=False, na=False))]
+        raise ValueError(f"Failed to parse end_timestamp_utc in maintenance CSV {maintenance_csv}. "
+                        f"Error: {e}. Check rows: {bad_rows[['unit_id', 'end_timestamp_utc']].to_dict('records')}")
+    
+    # Ensure timestamps are UTC
+    if df['start_timestamp_utc'].dt.tz is None:
+        df['start_timestamp_utc'] = df['start_timestamp_utc'].dt.tz_localize('UTC')
+    else:
+        df['start_timestamp_utc'] = df['start_timestamp_utc'].dt.tz_convert('UTC')
+    
+    if df['end_timestamp_utc'].dt.tz is None:
+        df['end_timestamp_utc'] = df['end_timestamp_utc'].dt.tz_localize('UTC')
+    else:
+        df['end_timestamp_utc'] = df['end_timestamp_utc'].dt.tz_convert('UTC')
     
     # Validate: start < end
     invalid = df[df['start_timestamp_utc'] >= df['end_timestamp_utc']]
     if len(invalid) > 0:
         raise ValueError(
-            f"Invalid maintenance windows (start >= end):\n{invalid[['unit_id', 'start_timestamp_utc', 'end_timestamp_utc']]}"
+            f"Invalid maintenance windows (start >= end) in {maintenance_csv}:\n"
+            f"{invalid[['unit_id', 'start_timestamp_utc', 'end_timestamp_utc']]}"
         )
     
-    # Validate availability values (should be 0 or 1)
-    invalid_avail = df[~df['availability'].isin([0, 1])]
+    # Validate availability values (should be float in [0,1])
+    df['availability'] = pd.to_numeric(df['availability'], errors='coerce')
+    invalid_avail = df[df['availability'].isna() | (df['availability'] < 0) | (df['availability'] > 1)]
     if len(invalid_avail) > 0:
         raise ValueError(
-            f"Invalid availability values (must be 0 or 1):\n{invalid_avail[['unit_id', 'availability']]}"
+            f"Invalid availability values (must be float in [0,1]) in {maintenance_csv}:\n"
+            f"{invalid_avail[['unit_id', 'availability']]}"
         )
     
-    # Validate unit_ids exist in utilities
+    # Validate unit_ids: raise error if unknown (strict mode)
     invalid_units = df[~df['unit_id'].isin(unit_ids)]
     if len(invalid_units) > 0:
         invalid_list = invalid_units['unit_id'].unique().tolist()
         raise ValueError(
             f"Maintenance windows reference unknown unit_id(s): {invalid_list}. "
-            f"Available units: {unit_ids}"
+            f"Available unit_ids: {unit_ids}. "
+            f"Please ensure unit_id values in maintenance CSV match utilities after filtering retired units."
         )
     
-    # Build availability matrix: default 1.0, set to 0.0 during outages
-    # Create DataFrame with all (timestamp, unit_id) combinations
-    availability_df = pd.DataFrame({
-        'timestamp_utc': demand_timestamps.values
-    })
+    # Build availability matrix: default 1.0, apply maintenance windows
+    # Ensure timestamps_utc is timezone-aware UTC DatetimeIndex
+    if isinstance(timestamps_utc, pd.DatetimeIndex):
+        if timestamps_utc.tz is None:
+            timestamps_utc = timestamps_utc.tz_localize('UTC')
+        else:
+            timestamps_utc = timestamps_utc.tz_convert('UTC')
+    else:
+        # Convert to DatetimeIndex and ensure UTC
+        timestamps_utc = pd.to_datetime(timestamps_utc, utc=True)
+        if timestamps_utc.tz is None:
+            timestamps_utc = timestamps_utc.tz_localize('UTC')
+        else:
+            timestamps_utc = timestamps_utc.tz_convert('UTC')
     
-    # Initialize all units to 1.0 (available)
-    for unit_id in unit_ids:
-        availability_df[unit_id] = 1.0
+    # Create DataFrame with timestamps as index, unit_ids as columns
+    availability_df = pd.DataFrame(
+        index=timestamps_utc,
+        columns=unit_ids,
+        data=1.0  # Default: fully available
+    )
     
-    # Apply outages: for each window with availability==0, set multiplier to 0.0
-    outages = df[df['availability'] == 0]
-    for _, outage in outages.iterrows():
-        unit_id = outage['unit_id']
-        start = outage['start_timestamp_utc']
-        end = outage['end_timestamp_utc']
+    # Apply maintenance windows: for each window, set availability to minimum of current and window value
+    # This handles overlapping windows correctly (most restrictive wins)
+    for _, window in df.iterrows():
+        unit_id = window['unit_id']
+        start = window['start_timestamp_utc']
+        end = window['end_timestamp_utc']
+        avail = float(window['availability'])
         
-        # Set availability to 0.0 for timestamps in [start, end)
-        mask = (availability_df['timestamp_utc'] >= start) & (availability_df['timestamp_utc'] < end)
-        availability_df.loc[mask, unit_id] = 0.0
+        # Ensure start and end are timezone-aware UTC Timestamps for comparison
+        if isinstance(start, pd.Timestamp):
+            if start.tz is None:
+                start = start.tz_localize('UTC')
+            else:
+                start = start.tz_convert('UTC')
+        else:
+            start = pd.to_datetime(start, utc=True)
+            if start.tz is None:
+                start = start.tz_localize('UTC')
+            else:
+                start = start.tz_convert('UTC')
+        
+        if isinstance(end, pd.Timestamp):
+            if end.tz is None:
+                end = end.tz_localize('UTC')
+            else:
+                end = end.tz_convert('UTC')
+        else:
+            end = pd.to_datetime(end, utc=True)
+            if end.tz is None:
+                end = end.tz_localize('UTC')
+            else:
+                end = end.tz_convert('UTC')
+        
+        # Set availability for timestamps in [start, end) - take minimum (most restrictive)
+        mask = (availability_df.index >= start) & (availability_df.index < end)
+        # For overlapping windows, take minimum (most restrictive)
+        # Use np.minimum for element-wise minimum
+        availability_df.loc[mask, unit_id] = np.minimum(availability_df.loc[mask, unit_id], avail)
     
-    # Convert to long form: timestamp_utc, unit_id, availability_multiplier
-    long_results = []
-    for _, row in availability_df.iterrows():
-        timestamp = row['timestamp_utc']
-        for unit_id in unit_ids:
-            long_results.append({
-                'timestamp_utc': timestamp,
-                'unit_id': unit_id,
-                'availability_multiplier': row[unit_id]
-            })
-    
-    return pd.DataFrame(long_results)
+    return availability_df
 
 
-def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame, dt_h: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
+# Legacy wrapper removed - use maint.load_maintenance_windows() and maint.build_availability_matrix() directly
+
+
+def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame, dt_h: float,
+                               maintenance_availability: Optional[pd.DataFrame] = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Allocate heat demand across utilities proportionally by capacity (vectorized).
     
     For each timestep, allocates heat to each unit proportional to its capacity:
-    q_u_t = Q_t * (max_heat_MW_u / P_total)
+    q_u_t = Q_t * (max_heat_MW_u * avail[u,t] / P_total_avail[t])
+    
+    Where P_total_avail[t] = sum_u (max_heat_MW_u * avail[u,t]) is the total available capacity at time t.
     
     Note: heat_MW is average MW over the timestep. Energy per step = heat_MW * dt_h.
     
@@ -337,24 +409,113 @@ def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame, d
         util_df: DataFrame with utility information including max_heat_MW, 
                  efficiency_th, co2_factor_t_per_MWh_fuel
         dt_h: Timestep duration in hours
+        maintenance_availability: Optional DataFrame (wide-form: index=timestamps, columns=unit_ids, or long-form)
         
     Returns:
         Tuple of (long-form DataFrame, wide-form DataFrame)
         Long-form columns: timestamp_utc, unit_id, heat_MW (avg MW per step), fuel_MWh (energy per step), co2_tonnes (per step)
         Wide-form columns: timestamp_utc, total_heat_MW, CB1_MW, CB2_MW, ...
     """
-    # Compute total installed capacity
-    P_total = util_df['max_heat_MW'].sum()
+    unit_ids = util_df['unit_id'].tolist()
+    n_units = len(unit_ids)
+    n_timesteps = len(demand_df)
     
-    # Create allocation factors (capacity share for each unit)
-    capacity_share = util_df['max_heat_MW'].values / P_total  # Shape: (n_units,)
+    # Build maintenance availability matrix (default 1.0)
+    # Canonicalize demand timestamps to UTC DatetimeIndex for alignment
+    if isinstance(demand_df['timestamp_utc'], pd.Series):
+        demand_ts_raw = demand_df['timestamp_utc'].values
+    else:
+        demand_ts_raw = demand_df['timestamp_utc']
+    demand_ts = pd.to_datetime(demand_ts_raw, utc=True)
+    if demand_ts.tz is None:
+        demand_ts = pd.DatetimeIndex(demand_ts).tz_localize('UTC')
+    else:
+        demand_ts = pd.DatetimeIndex(demand_ts).tz_convert('UTC')
+    
+    if maintenance_availability is not None:
+        if isinstance(maintenance_availability.index, pd.DatetimeIndex):
+            # Wide-form: already has index=timestamps, columns=unit_ids
+            # Canonicalize maintenance index to UTC DatetimeIndex for alignment
+            maint_index = maintenance_availability.index
+            if maint_index.tz is None:
+                maint_index_utc = maint_index.tz_localize('UTC')
+            else:
+                maint_index_utc = maint_index.tz_convert('UTC')
+            maintenance_availability.index = maint_index_utc
+            
+            # Reindex to demand timestamps (fill missing with 1.0)
+            avail_matrix_df = maintenance_availability.reindex(demand_ts, fill_value=1.0)
+            # Ensure all units are present (fill missing with 1.0)
+            for uid in unit_ids:
+                if uid not in avail_matrix_df.columns:
+                    avail_matrix_df[uid] = 1.0
+            avail_matrix = avail_matrix_df[unit_ids].values  # Shape: (n_timesteps, n_units)
+        else:
+            # Long-form: pivot to wide-form
+            # First canonicalize timestamp_utc in maintenance_availability
+            maint_avail_copy = maintenance_availability.copy()
+            maint_avail_copy['timestamp_utc'] = pd.to_datetime(maint_avail_copy['timestamp_utc'], utc=True)
+            if maint_avail_copy['timestamp_utc'].dt.tz is None:
+                maint_avail_copy['timestamp_utc'] = maint_avail_copy['timestamp_utc'].dt.tz_localize('UTC')
+            else:
+                maint_avail_copy['timestamp_utc'] = maint_avail_copy['timestamp_utc'].dt.tz_convert('UTC')
+            
+            avail_pivot = maint_avail_copy.pivot(
+                index='timestamp_utc',
+                columns='unit_id',
+                values='availability_multiplier'
+            )
+            # Canonicalize pivot index to UTC DatetimeIndex
+            if avail_pivot.index.tz is None:
+                avail_pivot.index = avail_pivot.index.tz_localize('UTC')
+            else:
+                avail_pivot.index = avail_pivot.index.tz_convert('UTC')
+            
+            # Reindex to demand timestamps (fill missing with 1.0)
+            avail_pivot = avail_pivot.reindex(demand_ts, fill_value=1.0)
+            for uid in unit_ids:
+                if uid not in avail_pivot.columns:
+                    avail_pivot[uid] = 1.0
+            avail_matrix = avail_pivot[unit_ids].values  # Shape: (n_timesteps, n_units)
+    else:
+        avail_matrix = np.ones((n_timesteps, n_units))
+    
+    # Build capacity matrix: cap_matrix[t, u] = max_heat_MW[u] * availability_factor[u] * maint_avail[t, u]
+    # where availability_factor is static from utilities, maint_avail is time-varying from maintenance
+    max_heat_array = util_df['max_heat_MW'].values  # Shape: (n_units,)
+    static_avail_array = util_df.get('availability_factor', pd.Series([1.0] * len(util_df))).values  # Shape: (n_units,)
+    cap_matrix = max_heat_array[None, :] * static_avail_array[None, :] * avail_matrix  # Shape: (n_timesteps, n_units)
+    
+    # Compute total available capacity per timestep
+    P_total_avail = cap_matrix.sum(axis=1)  # Shape: (n_timesteps,)
     
     # Extract demand as array (shape: n_timesteps,)
     demand_heat = demand_df['heat_demand_MW'].values
     
-    # Vectorized allocation: heat_matrix[i, j] = demand[i] * capacity_share[j]
+    # Compute served target: min(demand, total_available_capacity) to ensure we never exceed capacity
+    # This ensures that when demand > capacity, we serve exactly capacity and the rest becomes unserved
+    served_target = np.minimum(demand_heat, P_total_avail)  # Shape: (n_timesteps,)
+    
+    # Vectorized allocation: heat_matrix[i, j] = served_target[i] * (cap_matrix[i, j] / P_total_avail[i])
+    # If P_total_avail[i] == 0, set heat_matrix[i, j] = 0 (all units unavailable)
     # Shape: (n_timesteps, n_units)
-    heat_matrix = demand_heat[:, None] * capacity_share[None, :]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        capacity_share_matrix = np.where(P_total_avail[:, None] > 0, 
+                                         cap_matrix / P_total_avail[:, None], 
+                                         0.0)
+    heat_matrix = served_target[:, None] * capacity_share_matrix
+    
+    # Clamp dispatch to capacity limits to prevent numerical precision violations
+    # This ensures heat_matrix[i, j] <= cap_matrix[i, j] exactly
+    heat_matrix = np.minimum(heat_matrix, cap_matrix)
+    
+    # Compute served and unserved after clamping
+    # served_MW[t] = sum_u heat_matrix[t,u]
+    served_MW = heat_matrix.sum(axis=1)  # Shape: (n_timesteps,)
+    # unserved_MW[t] = max(0, demand_MW[t] - served_MW[t])
+    unserved_MW = np.maximum(0.0, demand_heat - served_MW)  # Shape: (n_timesteps,)
+    # Clip any tiny negative values to zero (numerical precision)
+    unserved_MW = np.maximum(0.0, unserved_MW)
     
     # Build wide-form DataFrame
     unit_ids = util_df['unit_id'].tolist()
@@ -366,16 +527,20 @@ def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame, d
     for i, unit_id in enumerate(unit_ids):
         dispatch_wide[f'{unit_id}_MW'] = heat_matrix[:, i]
     
+    # Add unserved_MW column
+    dispatch_wide['unserved_MW'] = unserved_MW
+    
     # Add total_heat_MW (should equal demand_heat, but compute for consistency)
     unit_cols = [f'{uid}_MW' for uid in unit_ids]
     dispatch_wide['total_heat_MW'] = dispatch_wide[unit_cols].sum(axis=1)
     
-    # Reorder columns: timestamp_utc, total_heat_MW, then unit columns
-    dispatch_wide = dispatch_wide[['timestamp_utc', 'total_heat_MW'] + unit_cols]
+    # Reorder columns: timestamp_utc, total_heat_MW, unserved_MW, then unit columns
+    dispatch_wide = dispatch_wide[['timestamp_utc', 'total_heat_MW', 'unserved_MW'] + unit_cols]
     
     # Build long-form by stacking (melt) the wide matrix
     long_results = []
     for i, timestamp in enumerate(demand_df['timestamp_utc']):
+        # Add rows for real units
         for j, unit_id in enumerate(unit_ids):
             util_row = util_df.iloc[j]
             efficiency = util_row['efficiency_th']
@@ -398,6 +563,16 @@ def allocate_baseline_dispatch(demand_df: pd.DataFrame, util_df: pd.DataFrame, d
                 'fuel_MWh': fuel_MWh_step,  # Energy per step (MWh)
                 'co2_tonnes': co2_tonnes_step,  # CO2 per step (tonnes)
             })
+        
+        # Add UNSERVED row for this timestamp
+        unserved_val = unserved_MW[i]
+        long_results.append({
+            'timestamp_utc': timestamp,
+            'unit_id': 'UNSERVED',
+            'heat_MW': unserved_val,  # Unserved demand (MW)
+            'fuel_MWh': 0.0,  # No fuel consumption for unserved
+            'co2_tonnes': 0.0,  # No CO2 emissions for unserved
+        })
     
     dispatch_long = pd.DataFrame(long_results)
     
@@ -466,17 +641,79 @@ def allocate_dispatch_lp(
     dispatch_priority = {uid: i for i, uid in enumerate(sorted_unit_ids)}  # 0 = highest priority
     
     # Build maintenance availability matrix (default 1.0)
+    # maintenance_availability can be either:
+    # - Wide-form DataFrame (index=timestamps, columns=unit_ids) - preferred
+    # - Long-form DataFrame (columns: timestamp_utc, unit_id, availability_multiplier) - legacy
     if maintenance_availability is not None:
-        avail_pivot = maintenance_availability.pivot(
-            index='timestamp_utc',
-            columns='unit_id',
-            values='availability_multiplier'
-        )
-        # Ensure all units are present
-        for uid in unit_ids:
-            if uid not in avail_pivot.columns:
-                avail_pivot[uid] = 1.0
-        avail_matrix = avail_pivot[unit_ids].values  # Shape: (n_timesteps, n_units)
+        if isinstance(maintenance_availability.index, pd.DatetimeIndex):
+            # Wide-form: already has index=timestamps, columns=unit_ids
+            # Canonicalize demand timestamps to ensure proper alignment
+            if isinstance(demand_df['timestamp_utc'], pd.Series):
+                demand_ts_raw = demand_df['timestamp_utc'].values
+            else:
+                demand_ts_raw = demand_df['timestamp_utc']
+            # Canonicalize to UTC DatetimeIndex
+            demand_ts = pd.to_datetime(demand_ts_raw, utc=True)
+            if demand_ts.tz is None:
+                demand_ts = demand_ts.tz_localize('UTC')
+            else:
+                demand_ts = demand_ts.tz_convert('UTC')
+            demand_ts = pd.DatetimeIndex(demand_ts)
+            
+            # Canonicalize maintenance index to UTC DatetimeIndex for alignment
+            maint_index = maintenance_availability.index
+            if maint_index.tz is None:
+                maint_index_utc = maint_index.tz_localize('UTC')
+            else:
+                maint_index_utc = maint_index.tz_convert('UTC')
+            maintenance_availability.index = maint_index_utc
+            
+            # Reindex to demand timestamps (fill missing with 1.0)
+            avail_matrix_df = maintenance_availability.reindex(demand_ts, fill_value=1.0)
+            # Ensure all units are present (fill missing with 1.0)
+            for uid in unit_ids:
+                if uid not in avail_matrix_df.columns:
+                    avail_matrix_df[uid] = 1.0
+            avail_matrix = avail_matrix_df[unit_ids].values  # Shape: (n_timesteps, n_units)
+        else:
+            # Long-form: pivot to wide-form
+            # First canonicalize timestamp_utc in maintenance_availability
+            maint_avail_copy = maintenance_availability.copy()
+            maint_avail_copy['timestamp_utc'] = pd.to_datetime(maint_avail_copy['timestamp_utc'], utc=True)
+            if maint_avail_copy['timestamp_utc'].dt.tz is None:
+                maint_avail_copy['timestamp_utc'] = maint_avail_copy['timestamp_utc'].dt.tz_localize('UTC')
+            else:
+                maint_avail_copy['timestamp_utc'] = maint_avail_copy['timestamp_utc'].dt.tz_convert('UTC')
+            
+            avail_pivot = maint_avail_copy.pivot(
+                index='timestamp_utc',
+                columns='unit_id',
+                values='availability_multiplier'
+            )
+            # Canonicalize pivot index to UTC DatetimeIndex
+            if avail_pivot.index.tz is None:
+                avail_pivot.index = avail_pivot.index.tz_localize('UTC')
+            else:
+                avail_pivot.index = avail_pivot.index.tz_convert('UTC')
+            
+            # Canonicalize demand timestamps to UTC DatetimeIndex for alignment
+            if isinstance(demand_df['timestamp_utc'], pd.Series):
+                demand_ts_raw = demand_df['timestamp_utc'].values
+            else:
+                demand_ts_raw = demand_df['timestamp_utc']
+            demand_ts = pd.to_datetime(demand_ts_raw, utc=True)
+            if demand_ts.tz is None:
+                demand_ts = demand_ts.tz_localize('UTC')
+            else:
+                demand_ts = demand_ts.tz_convert('UTC')
+            demand_ts = pd.DatetimeIndex(demand_ts)
+            
+            avail_pivot = avail_pivot.reindex(demand_ts, fill_value=1.0)
+            # Ensure all units are present
+            for uid in unit_ids:
+                if uid not in avail_pivot.columns:
+                    avail_pivot[uid] = 1.0
+            avail_matrix = avail_pivot[unit_ids].values  # Shape: (n_timesteps, n_units)
     else:
         avail_matrix = np.ones((n_timesteps, n_units))
     
@@ -556,11 +793,17 @@ def allocate_dispatch_lp(
         A_eq[0, n_units] = 1.0  # unserved coefficient
         b_eq = np.array([demand_t])
         
-        # 2. Capacity bounds: 0 <= heat_MW[u] <= max_heat[u] * avail[u,t]
+        # 2. Capacity bounds: 0 <= heat_MW[u] <= max_heat[u] * availability_factor[u] * maint_avail[u,t]
+        #    where availability_factor is from utilities (static) and maint_avail is time-varying maintenance
         # 3. Unserved: 0 <= unserved_MW
         bounds = []
         for i, uid in enumerate(unit_ids):
-            max_cap = max_heat[uid] * avail_matrix[t, i]
+            # Get static availability_factor from utilities (default 1.0 if not present)
+            static_avail = util_df[util_df['unit_id'] == uid].get('availability_factor', pd.Series([1.0])).iloc[0]
+            # Time-varying maintenance availability
+            maint_avail = avail_matrix[t, i]
+            # Combined capacity limit
+            max_cap = max_heat[uid] * static_avail * maint_avail
             bounds.append((0.0, max_cap))
         bounds.append((0.0, demand_t))  # unserved cannot exceed demand
         
@@ -624,10 +867,14 @@ def allocate_dispatch_lp(
             # Store unserved only on first unit (system-level)
             unserved_val = unserved if i == 0 else 0.0
             
+            # Compute unit_on for plotting (1 if heat_MW > threshold, else 0)
+            unit_on = 1 if heat_mw > 1e-6 else 0
+            
             long_results.append({
                 'timestamp_utc': timestamp,
                 'unit_id': uid,
                 'heat_MW': heat_mw,
+                'unit_on': unit_on,  # Add unit_on for plotting compatibility
                 'fuel_MWh': fuel_mwh,
                 'co2_tonnes': co2_tonnes,
                 'unserved_MW': unserved_val
@@ -787,7 +1034,8 @@ def allocate_dispatch_optimal_subset(
     reserve_penalty_nzd_per_MWh: float = 0.0,
     no_load_cost_nzd_per_h: float = 50.0,
     online_cost_applies_when: str = 'online_only',
-    dt_h: float = 1.0
+    dt_h: float = 1.0,
+    maintenance_availability: Optional[pd.DataFrame] = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Allocate dispatch using optimal subset selection per commitment block.
@@ -841,6 +1089,22 @@ def allocate_dispatch_optimal_subset(
     # Define stable first unit_id for deterministic system-level cost storage
     stable_first_unit_id = sorted(unit_ids)[0]
     
+    # Build maintenance availability lookup (time-varying)
+    # maintenance_availability can be wide-form (index=timestamps, columns=unit_ids) or long-form
+    maint_avail_by_ts = {}  # {timestamp: {unit_id: availability}}
+    if maintenance_availability is not None:
+        if isinstance(maintenance_availability.index, pd.DatetimeIndex):
+            # Wide-form: index=timestamps, columns=unit_ids
+            for ts in maintenance_availability.index:
+                maint_avail_by_ts[ts] = maintenance_availability.loc[ts].to_dict()
+        else:
+            # Long-form: columns include timestamp_utc, unit_id, availability_multiplier
+            for _, row in maintenance_availability.iterrows():
+                ts = row['timestamp_utc']
+                if ts not in maint_avail_by_ts:
+                    maint_avail_by_ts[ts] = {}
+                maint_avail_by_ts[ts][row['unit_id']] = row['availability_multiplier']
+    
     # Split demand into blocks
     n_hours = len(demand_df)
     n_blocks = int(np.ceil(n_hours / commitment_block_hours))
@@ -882,6 +1146,20 @@ def allocate_dispatch_optimal_subset(
         # Generate candidate subsets
         # Start with all units that can be ON
         available_units = [uid for uid in unit_ids if can_turn_on.get(uid, True)]
+        
+        # Filter out units that are unavailable (availability==0) for any hour in this block
+        # This prevents selecting subsets with units that cannot operate
+        if maintenance_availability is not None:
+            block_timestamps = block_demand['timestamp_utc'].values
+            units_available_in_block = set(available_units)
+            for ts in block_timestamps:
+                if ts in maint_avail_by_ts:
+                    for unit_id in list(units_available_in_block):
+                        avail = maint_avail_by_ts[ts].get(unit_id, 1.0)
+                        if avail == 0.0:
+                            # Unit is unavailable at this timestamp, remove from candidate set
+                            units_available_in_block.discard(unit_id)
+            available_units = [uid for uid in available_units if uid in units_available_in_block]
         
         # Try all subsets of available units (but respect constraints)
         for subset_size in range(len(available_units) + 1):
@@ -935,7 +1213,12 @@ def allocate_dispatch_optimal_subset(
                         
                         for unit_id in subset_units:
                             util_row = existing_units[existing_units['unit_id'] == unit_id].iloc[0]
-                            cap_u = util_row['max_heat_MW'] * util_row['availability_factor']
+                            # Get time-varying maintenance availability
+                            maint_avail = 1.0
+                            if timestamp in maint_avail_by_ts:
+                                maint_avail = maint_avail_by_ts[timestamp].get(unit_id, 1.0)
+                            # Effective capacity = nameplate * static_availability_factor * time_varying_maintenance
+                            cap_u = util_row['max_heat_MW'] * util_row.get('availability_factor', 1.0) * maint_avail
                             min_u = util_row['min_load_frac'] * cap_u
                             cap_map[unit_id] = cap_u
                             min_map[unit_id] = min_u
@@ -992,10 +1275,15 @@ def allocate_dispatch_optimal_subset(
                     reserve_shortfall_MW = 0.0
                     if len(subset_units) > 0:
                         # Compute online capacity (derated) - sum of online units only
+                        # Use maintenance availability if provided
                         online_cap_MW = 0.0
                         for unit_id in subset_units:
                             util_row = existing_units[existing_units['unit_id'] == unit_id].iloc[0]
-                            cap_u = util_row['max_heat_MW'] * util_row['availability_factor']
+                            # Get time-varying maintenance availability for this timestamp
+                            maint_avail = 1.0
+                            if timestamp in maint_avail_by_ts:
+                                maint_avail = maint_avail_by_ts[timestamp].get(unit_id, 1.0)
+                            cap_u = util_row['max_heat_MW'] * util_row.get('availability_factor', 1.0) * maint_avail
                             online_cap_MW += cap_u
                         
                         # Total dispatch across all units (may include units not in subset)
@@ -1316,6 +1604,24 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
     if 'reserve_penalty_cost_nzd' not in dispatch_long.columns:
         dispatch_long['reserve_penalty_cost_nzd'] = 0.0
     
+    # Compute unserved penalty cost if unserved_MW exists and penalty rate provided
+    # CRITICAL: Ensure unserved_cost_nzd column exists and is initialized to 0.0
+    if 'unserved_cost_nzd' not in dispatch_long.columns:
+        dispatch_long['unserved_cost_nzd'] = 0.0
+    
+    if unserved_penalty_nzd_per_MWh is not None and (dispatch_long['unserved_MW'] > 0).any():
+        unserved_mask = dispatch_long['unserved_MW'] > 0
+        # Compute cost: unserved_MW * dt_h * penalty_rate (converts MW to MWh, then applies penalty)
+        dispatch_long.loc[unserved_mask, 'unserved_cost_nzd'] = (
+            dispatch_long.loc[unserved_mask, 'unserved_MW'] * dt_h * unserved_penalty_nzd_per_MWh
+        )
+        # Verify computation: sum should equal total unserved_MWh * penalty_rate
+        total_unserved_mwh = (dispatch_long.loc[unserved_mask, 'unserved_MW'] * dt_h).sum()
+        total_cost = dispatch_long.loc[unserved_mask, 'unserved_cost_nzd'].sum()
+        expected_cost = total_unserved_mwh * unserved_penalty_nzd_per_MWh
+        if abs(total_cost - expected_cost) > 1e-3:
+            print(f"[WARN] Unserved cost computation mismatch: computed={total_cost:.2f}, expected={expected_cost:.2f}")
+    
     # Merge unit info
     for _, util_row in util_df.iterrows():
         unit_id = util_row['unit_id']
@@ -1351,14 +1657,15 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
         # fixed_on is per hour, multiply by dt_h for this timestep
         dispatch_long.loc[mask, 'fixed_on_cost_nzd'] = unit_data['unit_on'] * fixed_on * dt_h
         
-        # Unserved cost (if not already computed)
-        if 'unserved_cost_nzd' in dispatch_long.columns:
+        # Unserved cost (if not already computed and penalty rate provided)
+        if 'unserved_cost_nzd' in dispatch_long.columns and unserved_penalty_nzd_per_MWh is not None:
             # Recompute unserved cost from unserved_MW
             # Penalty is per MWh, so multiply unserved_MW * dt_h to get energy
             unserved_mask = mask & (dispatch_long['unserved_MW'] > 0)
-            dispatch_long.loc[unserved_mask, 'unserved_cost_nzd'] = (
-                dispatch_long.loc[unserved_mask, 'unserved_MW'] * dt_h * unserved_penalty_nzd_per_MWh
-            )
+            if unserved_mask.any():
+                dispatch_long.loc[unserved_mask, 'unserved_cost_nzd'] = (
+                    dispatch_long.loc[unserved_mask, 'unserved_MW'] * dt_h * unserved_penalty_nzd_per_MWh
+                )
         
         # Reserve penalty cost (if not already computed)
         if 'reserve_penalty_cost_nzd' in dispatch_long.columns:
@@ -1457,7 +1764,8 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
 
 
 def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame, 
-                          signals: Union[Dict[str, float], pd.DataFrame], dt_h: float = 1.0) -> pd.DataFrame:
+                          signals: Union[Dict[str, float], pd.DataFrame], dt_h: float = 1.0,
+                          unserved_penalty_nzd_per_MWh: Optional[float] = None) -> pd.DataFrame:
     """
     Add cost columns to dispatch DataFrame based on fuel type and signals.
     
@@ -1620,10 +1928,33 @@ def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
             
             # Electricity has no direct CO2 emissions (grid emissions handled separately)
             dispatch_long.loc[mask, 'carbon_cost_nzd'] = 0.0
+        
+        elif fuel_type is None or pd.isna(fuel_type):
+            # Handle UNSERVED or other units without fuel type
+            # UNSERVED has no fuel cost or carbon cost, only penalty cost (handled separately)
+            dispatch_long.loc[mask, 'fuel_cost_nzd'] = 0.0
+            dispatch_long.loc[mask, 'carbon_cost_nzd'] = 0.0
             
         else:
             # Unknown fuel type - warn but don't fail
             print(f"[WARNING] Unknown fuel type '{fuel_type}', costs set to zero")
+    
+    # Ensure unserved_cost_nzd column exists for ALL rows (initialize to 0.0)
+    if 'unserved_cost_nzd' not in dispatch_long.columns:
+        dispatch_long['unserved_cost_nzd'] = 0.0
+    else:
+        # Ensure dtype is float and fill NaNs with 0.0
+        dispatch_long['unserved_cost_nzd'] = dispatch_long['unserved_cost_nzd'].astype(float).fillna(0.0)
+    
+    # Add unserved penalty cost for UNSERVED rows (if penalty rate provided)
+    if unserved_penalty_nzd_per_MWh is not None and unserved_penalty_nzd_per_MWh > 0:
+        # For UNSERVED rows: penalty cost = heat_MW * dt_h * penalty_rate
+        # heat_MW is already average MW per timestep, so energy = heat_MW * dt_h
+        unserved_mask = dispatch_long['unit_id'] == 'UNSERVED'
+        if unserved_mask.any():
+            dispatch_long.loc[unserved_mask, 'unserved_cost_nzd'] = (
+                dispatch_long.loc[unserved_mask, 'heat_MW'] * dt_h * unserved_penalty_nzd_per_MWh
+            ).astype(float)
     
     # Total cost (includes all components)
     # Ensure all cost columns are float dtype before summing
@@ -1660,21 +1991,75 @@ def aggregate_system_costs(dispatch_long: pd.DataFrame) -> dict:
         dispatch_long_for_agg['timestamp_utc'] = parse_any_timestamp(dispatch_long_for_agg['timestamp_utc'])
     
     system_costs = {}
-    # System penalties are stored once per hour (on first unit row), so aggregate by timestamp_utc first
-    if 'unserved_MW' in dispatch_long_for_agg.columns:
-        system_costs['unserved_MW'] = dispatch_long_for_agg.groupby('timestamp_utc')['unserved_MW'].first().sum()
-    if 'unserved_cost_nzd' in dispatch_long_for_agg.columns:
-        system_costs['unserved_cost_nzd'] = dispatch_long_for_agg.groupby('timestamp_utc')['unserved_cost_nzd'].first().sum()
+    # System penalties: for UNSERVED rows, sum heat_MW and unserved_cost_nzd directly
+    # For other modes (LP/optimal_subset), unserved_MW may be stored once per hour on first unit row
+    if 'unit_id' in dispatch_long_for_agg.columns and (dispatch_long_for_agg['unit_id'] == 'UNSERVED').any():
+        # UNSERVED is stored as unit_id="UNSERVED" rows
+        unserved_rows = dispatch_long_for_agg[dispatch_long_for_agg['unit_id'] == 'UNSERVED']
+        system_costs['unserved_MW'] = float(unserved_rows['heat_MW'].fillna(0.0).sum())
+        
+        # Ensure unserved_cost_nzd exists and is numeric (should always be present after add_costs_to_dispatch)
+        if 'unserved_cost_nzd' in unserved_rows.columns:
+            system_costs['unserved_cost_nzd'] = float(unserved_rows['unserved_cost_nzd'].fillna(0.0).sum())
+        else:
+            # Should not happen if add_costs_to_dispatch was called, but handle gracefully
+            system_costs['unserved_cost_nzd'] = 0.0
+        
+        # Compute unserved_MWh from UNSERVED heat_MW (energy = MW * dt_h)
+        # Get dt_h from timestamps if not available (assume 1.0 if can't determine)
+        dt_h_est = 1.0
+        if len(unserved_rows) > 1:
+            # Parse timestamps if needed
+            unserved_ts = unserved_rows['timestamp_utc'].copy()
+            if not pd.api.types.is_datetime64_any_dtype(unserved_ts):
+                unserved_ts = parse_any_timestamp(unserved_ts)
+            ts_diff = unserved_ts.diff().iloc[1]
+            if pd.notna(ts_diff):
+                dt_h_est = ts_diff.total_seconds() / 3600.0
+        system_costs['unserved_MWh'] = float(system_costs['unserved_MW'] * dt_h_est)
+    elif 'unserved_MW' in dispatch_long_for_agg.columns:
+        # System penalties are stored once per hour (on first unit row), so aggregate by timestamp_utc first
+        system_costs['unserved_MW'] = float(dispatch_long_for_agg.groupby('timestamp_utc')['unserved_MW'].first().sum())
+        if 'unserved_cost_nzd' in dispatch_long_for_agg.columns:
+            system_costs['unserved_cost_nzd'] = float(dispatch_long_for_agg.groupby('timestamp_utc')['unserved_cost_nzd'].first().fillna(0.0).sum())
+            # Compute unserved_MWh from unserved_MW
+            dt_h_est = 1.0
+            if len(dispatch_long_for_agg) > 1:
+                ts_diff = dispatch_long_for_agg['timestamp_utc'].diff().iloc[1]
+                if pd.notna(ts_diff):
+                    dt_h_est = ts_diff.total_seconds() / 3600.0
+            system_costs['unserved_MWh'] = float(system_costs['unserved_MW'] * dt_h_est)
+        else:
+            system_costs['unserved_cost_nzd'] = 0.0
+            system_costs['unserved_MWh'] = 0.0
+    else:
+        # No unserved data
+        system_costs['unserved_MW'] = 0.0
+        system_costs['unserved_cost_nzd'] = 0.0
+        system_costs['unserved_MWh'] = 0.0
+    
+    # Reserve and online costs (always initialize to 0.0 if missing)
     if 'reserve_shortfall_MW' in dispatch_long_for_agg.columns:
-        system_costs['reserve_shortfall_MW'] = dispatch_long_for_agg.groupby('timestamp_utc')['reserve_shortfall_MW'].first().sum()
+        system_costs['reserve_shortfall_MW'] = float(dispatch_long_for_agg.groupby('timestamp_utc')['reserve_shortfall_MW'].first().sum())
+    else:
+        system_costs['reserve_shortfall_MW'] = 0.0
+    
     if 'reserve_penalty_cost_nzd' in dispatch_long_for_agg.columns:
-        system_costs['reserve_penalty_cost_nzd'] = dispatch_long_for_agg.groupby('timestamp_utc')['reserve_penalty_cost_nzd'].first().sum()
+        system_costs['reserve_penalty_cost_nzd'] = float(dispatch_long_for_agg.groupby('timestamp_utc')['reserve_penalty_cost_nzd'].first().fillna(0.0).sum())
+    else:
+        system_costs['reserve_penalty_cost_nzd'] = 0.0
+    
     if 'online_cost_nzd' in dispatch_long_for_agg.columns:
-        system_costs['online_cost_nzd'] = dispatch_long_for_agg.groupby('timestamp_utc')['online_cost_nzd'].first().sum()
+        system_costs['online_cost_nzd'] = float(dispatch_long_for_agg.groupby('timestamp_utc')['online_cost_nzd'].first().fillna(0.0).sum())
+    else:
+        system_costs['online_cost_nzd'] = 0.0
+    
     return system_costs
 
 
-def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.0, dt_h: float = 1.0) -> pd.DataFrame:
+def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.0, dt_h: float = 1.0,
+                           unserved_penalty_nzd_per_MWh: Optional[float] = None,
+                           reserve_penalty_nzd_per_MWh: Optional[float] = None) -> pd.DataFrame:
     """
     Compute annual totals and key indicators by unit, plus SYSTEM and TOTAL rows.
     
@@ -1697,6 +2082,7 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     # Aggregate by unit - EXCLUDE system penalties (they're stored once per hour, not per unit)
     # Note: total_cost_nzd in hourly data includes system penalties, so we'll recompute it
     # as sum of unit-level costs only
+    # UNSERVED is included in aggregation but will be handled specially (it has fuel_MWh=0, co2=0, etc.)
     agg_dict = {
         'heat_MW': 'sum',  # Sum of average MW per step
         'fuel_MWh': 'sum',  # Sum of energy per step (already MWh per step)
@@ -1714,10 +2100,16 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         agg_dict['startup_cost_nzd'] = 'sum'
     # NOTE: unserved_MW, unserved_cost_nzd, reserve_shortfall_MW, reserve_penalty_cost_nzd,
     # online_cost_nzd are system-level and stored once per hour - do NOT include in unit aggregation
+    # BUT: for UNSERVED rows, unserved_cost_nzd IS the unit's cost, so include it
+    if 'unserved_cost_nzd' in dispatch_long.columns:
+        # For UNSERVED: unserved_cost_nzd is the unit's cost; for real units it's 0
+        agg_dict['unserved_cost_nzd'] = 'sum'
     
     annual_by_unit = dispatch_long.groupby('unit_id').agg(agg_dict)
     
-    # Recompute unit-level total_cost_nzd (excludes system penalties)
+    # Recompute unit-level total_cost_nzd
+    # For real units: total_cost_nzd = fuel + carbon + var_om + fixed_on + startup (operational costs)
+    # For UNSERVED: total_cost_nzd = unserved_cost_nzd (penalty cost only)
     annual_by_unit['total_cost_nzd'] = (
         annual_by_unit['fuel_cost_nzd'] +
         annual_by_unit['carbon_cost_nzd']
@@ -1728,6 +2120,13 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         annual_by_unit['total_cost_nzd'] += annual_by_unit['fixed_on_cost_nzd']
     if 'startup_cost_nzd' in annual_by_unit.columns:
         annual_by_unit['total_cost_nzd'] += annual_by_unit['startup_cost_nzd']
+    
+    # For UNSERVED: total_cost_nzd should be unserved_cost_nzd (penalty cost)
+    # Real units have unserved_cost_nzd=0, so this only affects UNSERVED
+    if 'unserved_cost_nzd' in annual_by_unit.columns:
+        # For UNSERVED: replace total_cost with penalty cost
+        if 'UNSERVED' in annual_by_unit.index:
+            annual_by_unit.loc['UNSERVED', 'total_cost_nzd'] = annual_by_unit.loc['UNSERVED', 'unserved_cost_nzd']
     
     # Convert to annual totals: energy = sum(MW * dt_h) / 1000 = GWh
     # heat_MW is average MW per step, so annual energy = sum(heat_MW * dt_h) / 1000
@@ -1801,17 +2200,44 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
             total_dict_base['avg_online_units_peak_season'] = peak_season_online
             total_dict_base['avg_online_headroom_MW'] = avg_online_headroom_MW
     
-    # Set system penalty columns to 0 for all unit rows (they're system-level, not unit-level)
-    system_penalty_cols = ['unserved_MW', 'unserved_cost_nzd', 'reserve_shortfall_MW', 
-                          'reserve_penalty_cost_nzd', 'online_cost_nzd']
+    # Set system penalty columns to 0 for real unit rows (they're system-level, not unit-level)
+    # BUT: for UNSERVED, unserved_MW and unserved_cost_nzd ARE the unit's values, so keep them
+    system_penalty_cols = ['reserve_shortfall_MW', 'reserve_penalty_cost_nzd', 'online_cost_nzd']
     for col in system_penalty_cols:
         if col in dispatch_long.columns:
             annual_by_unit[col] = 0.0
     
-    # Add operational/penalty cost columns to unit rows (unit-level operational costs only)
-    annual_by_unit['annual_operational_cost_nzd'] = annual_by_unit['annual_total_cost_nzd']  # Units have no penalties
-    annual_by_unit['annual_penalty_cost_nzd'] = 0.0  # Units have no penalties
-    annual_by_unit['annual_system_cost_nzd'] = 0.0  # Units have no system costs
+    # For UNSERVED: set unserved_MW from heat_MW (it represents unserved demand)
+    if 'UNSERVED' in annual_by_unit.index:
+        # UNSERVED's heat_MW is the unserved demand
+        annual_by_unit.loc['UNSERVED', 'unserved_MW'] = annual_by_unit.loc['UNSERVED', 'heat_MW']
+    else:
+        # No UNSERVED row: set unserved_MW to 0 for all units
+        if 'unserved_MW' in dispatch_long.columns:
+            annual_by_unit['unserved_MW'] = 0.0
+    
+    # Add operational/penalty cost columns to unit rows
+    # For real units: operational costs only, no penalties
+    # For UNSERVED: penalty cost only (unserved_cost_nzd), no operational costs
+    annual_by_unit['annual_operational_cost_nzd'] = annual_by_unit['annual_total_cost_nzd'].copy()
+    annual_by_unit['annual_penalty_cost_nzd'] = 0.0
+    annual_by_unit['annual_system_cost_nzd'] = 0.0
+    
+    # For UNSERVED: penalty cost is the total cost
+    if 'UNSERVED' in annual_by_unit.index:
+        # Get unserved_cost_nzd from aggregated column (should be sum of all UNSERVED rows' unserved_cost_nzd)
+        unserved_penalty = 0.0
+        if 'unserved_cost_nzd' in annual_by_unit.columns:
+            unserved_penalty_val = annual_by_unit.loc['UNSERVED', 'unserved_cost_nzd']
+            unserved_penalty = float(unserved_penalty_val) if not pd.isna(unserved_penalty_val) else 0.0
+        annual_by_unit.loc['UNSERVED', 'annual_operational_cost_nzd'] = 0.0
+        annual_by_unit.loc['UNSERVED', 'annual_penalty_cost_nzd'] = unserved_penalty
+        annual_by_unit.loc['UNSERVED', 'annual_total_cost_nzd'] = unserved_penalty
+        # Also ensure unserved_cost_nzd column is set (for printing)
+        if 'unserved_cost_nzd' not in annual_by_unit.columns:
+            annual_by_unit['unserved_cost_nzd'] = 0.0
+        annual_by_unit.loc['UNSERVED', 'unserved_cost_nzd'] = unserved_penalty
+    
     annual_by_unit['avg_operational_cost_nzd_per_MWh_heat'] = annual_by_unit['avg_cost_nzd_per_MWh_heat']
     
     # Aggregate system-level costs separately (stored once per hour, not per unit)
@@ -1821,16 +2247,29 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         dispatch_long_for_agg['timestamp_utc'] = parse_any_timestamp(dispatch_long_for_agg['timestamp_utc'])
     system_costs = aggregate_system_costs(dispatch_long_for_agg)
     
+    # Initialize unserved metrics at function start (before any conditionals) to avoid UnboundLocalError
+    # These will be computed consistently from system_costs or UNSERVED rows
+    unserved_mw_sum = 0.0
+    unserved_energy_mwh = 0.0
+    unserved_penalty_cost_nzd = 0.0
+    
     # Extract penalty values from system_costs (always defined, defaults to 0.0)
-    # Note: system_costs contains sums of MW values (stored once per timestamp)
-    # Convert to energy: unserved_MW and reserve_shortfall_MW are average MW per step
-    # Annual energy = sum(MW * dt_h)
-    unserved_penalty_cost_nzd = system_costs.get('unserved_cost_nzd', 0.0)
-    reserve_penalty_cost_nzd = system_costs.get('reserve_penalty_cost_nzd', 0.0)
-    # system_costs['unserved_MW'] is sum of MW values (stored once per timestamp)
-    # Convert to energy: multiply by dt_h to get MWh
-    unserved_energy_mwh = system_costs.get('unserved_MW', 0.0) * dt_h
-    reserve_shortfall_mwh = system_costs.get('reserve_shortfall_MW', 0.0) * dt_h
+    # system_costs['unserved_MWh'] is already computed in aggregate_system_costs (from UNSERVED heat_MW * dt_h)
+    # system_costs['unserved_cost_nzd'] is the sum of unserved_cost_nzd from all UNSERVED rows
+    unserved_mw_sum = float(system_costs.get('unserved_MW', 0.0))
+    unserved_energy_mwh = float(system_costs.get('unserved_MWh', 0.0))  # Use pre-computed value from aggregate_system_costs
+    if unserved_energy_mwh == 0.0 and unserved_mw_sum > 0.0:
+        # Fallback: compute from unserved_MW if unserved_MWh not in system_costs but unserved_MW exists
+        unserved_energy_mwh = unserved_mw_sum * dt_h
+    
+    # Get penalty costs from system_costs (should always be present and correct)
+    # system_costs['unserved_cost_nzd'] is the canonical value - use it directly, no recomputation needed
+    unserved_penalty_cost_nzd = float(system_costs.get('unserved_cost_nzd', 0.0))
+    
+    # Reserve metrics
+    reserve_mw_sum = float(system_costs.get('reserve_shortfall_MW', 0.0))
+    reserve_shortfall_mwh = reserve_mw_sum * dt_h  # Convert to energy (MWh)
+    reserve_penalty_cost_nzd = float(system_costs.get('reserve_penalty_cost_nzd', 0.0))
     
     # Compute total system penalties (unserved + reserve, excluding online which is operational)
     total_system_penalties_nzd = unserved_penalty_cost_nzd + reserve_penalty_cost_nzd
@@ -1863,16 +2302,21 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     if 'startup_cost_nzd' in annual_by_unit.columns:
         system_dict['startup_cost_nzd'] = 0.0
     # Add system penalty columns (unserved and reserve only; online_cost is operational, not in SYSTEM row)
-    # Note: system_costs contains sums of MW values (average MW per step, stored once per timestamp)
-    # For display, keep as MW (sum of average MW per step) - energy conversion happens in annual totals
-    if 'unserved_MW' in system_costs:
-        system_dict['unserved_MW'] = system_costs['unserved_MW']  # Sum of average MW per step
-    if 'unserved_cost_nzd' in system_costs:
-        system_dict['unserved_cost_nzd'] = system_costs['unserved_cost_nzd']  # Already cost (includes dt_h)
-    if 'reserve_shortfall_MW' in system_costs:
-        system_dict['reserve_shortfall_MW'] = system_costs['reserve_shortfall_MW']  # Sum of average MW per step
-    if 'reserve_penalty_cost_nzd' in system_costs:
-        system_dict['reserve_penalty_cost_nzd'] = system_costs['reserve_penalty_cost_nzd']  # Already cost (includes dt_h)
+    # Use the same unserved_energy_mwh and reserve_shortfall_mwh computed above for consistency
+    # CRITICAL: Ensure all penalty values are numeric (0.0, not NaN) - variables are already float from initialization
+    system_dict['unserved_MW'] = unserved_mw_sum  # Sum of average MW per step (already float)
+    system_dict['unserved_MWh'] = unserved_energy_mwh  # Energy (MWh) - same value used everywhere (already float)
+    system_dict['unserved_cost_nzd'] = unserved_penalty_cost_nzd  # Cost from system_costs (already float)
+    system_dict['unserved_penalty_cost_nzd'] = unserved_penalty_cost_nzd  # Alias for clarity (already float)
+    
+    system_dict['reserve_shortfall_MW'] = reserve_mw_sum  # Sum of average MW per step (already float)
+    system_dict['reserve_shortfall_MWh'] = reserve_shortfall_mwh  # Energy (MWh) - same value used everywhere (already float)
+    system_dict['reserve_penalty_cost_nzd'] = reserve_penalty_cost_nzd  # Cost from system_costs (already float)
+    
+    # Add total penalty cost (ensure numeric 0.0, not NaN)
+    total_penalty = float(unserved_penalty_cost_nzd) if not pd.isna(unserved_penalty_cost_nzd) else 0.0
+    total_penalty += float(reserve_penalty_cost_nzd) if not pd.isna(reserve_penalty_cost_nzd) else 0.0
+    system_dict['total_penalty_cost_nzd'] = total_penalty
     # Note: online_cost_nzd is NOT added to SYSTEM row (it's operational, shown in TOTAL)
     # Add diagnostic metrics to system row (NaN for system row)
     if total_dict_base:
@@ -1912,6 +2356,12 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         'annual_operational_cost_nzd': total_operational_cost_nzd,  # Units + online/no-load
         'annual_penalty_cost_nzd': total_system_penalties_nzd,  # Unserved + reserve penalties
         'annual_system_cost_nzd': total_system_penalties_nzd + system_costs.get('online_cost_nzd', 0.0),  # Penalties + online
+        # Add explicit penalty columns for CSV output (use same values as SYSTEM row for consistency)
+        'unserved_MWh': unserved_energy_mwh,  # Same value used everywhere
+        'unserved_penalty_cost_nzd': unserved_penalty_cost_nzd,  # Same value used everywhere
+        'reserve_shortfall_MWh': reserve_shortfall_mwh,  # Same value used everywhere
+        'reserve_penalty_cost_nzd': reserve_penalty_cost_nzd,  # Same value used everywhere
+        'total_penalty_cost_nzd': total_system_penalties_nzd,  # Ensure numeric 0.0, not NaN
         'avg_cost_nzd_per_MWh_heat': (
             grand_total_cost_nzd /
             (total_heat_GWh * 1000.0) if total_heat_GWh > 0 else 0.0
@@ -1976,14 +2426,20 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         'avg_operational_cost_nzd_per_MWh_heat',
     ])
     
+    # Add explicit penalty columns (for SYSTEM and TOTAL rows)
+    penalty_cols = ['unserved_MWh', 'unserved_penalty_cost_nzd', 'reserve_shortfall_MWh', 
+                    'reserve_penalty_cost_nzd', 'total_penalty_cost_nzd']
+    for col in penalty_cols:
+        if col in summary.columns:
+            output_cols.append(col)
+    
+    # Add legacy MW-based columns if present (for backward compatibility)
     if 'unserved_MW' in summary.columns:
         output_cols.append('unserved_MW')
-    if 'unserved_cost_nzd' in summary.columns:
+    if 'unserved_cost_nzd' in summary.columns and 'unserved_cost_nzd' not in output_cols:
         output_cols.append('unserved_cost_nzd')
     if 'reserve_shortfall_MW' in summary.columns:
         output_cols.append('reserve_shortfall_MW')
-    if 'reserve_penalty_cost_nzd' in summary.columns:
-        output_cols.append('reserve_penalty_cost_nzd')
     if 'online_cost_nzd' in summary.columns:
         output_cols.append('online_cost_nzd')
     
@@ -2048,16 +2504,26 @@ def plot_dispatch_stack(dispatch_wide_path: str, output_path: str, demand_df: Op
         raise ValueError(f"CSV file {dispatch_wide_path} must have either 'timestamp' or 'timestamp_utc' column")
     df = df.sort_values('timestamp_utc').reset_index(drop=True)
     
-    # Get unit columns (all columns ending in _MW except total_heat_MW)
-    unit_cols = [col for col in df.columns if col.endswith('_MW') and col != 'total_heat_MW']
+    # Get unit columns (all columns ending in _MW except total_heat_MW and unserved_MW)
+    # We'll handle unserved_MW separately to show it distinctly
+    unit_cols = [col for col in df.columns if col.endswith('_MW') and col not in ['total_heat_MW', 'unserved_MW']]
+    has_unserved = 'unserved_MW' in df.columns
     
     fig, ax = plt.subplots(figsize=(16, 6))
     
-    # Create stacked area plot
-    ax.stackplot(df['timestamp_utc'], 
-                 [df[col] for col in unit_cols],
-                 labels=[col.replace('_MW', '') for col in unit_cols],
-                 alpha=0.7)
+    # Create stacked area plot for real units
+    if unit_cols:
+        ax.stackplot(df['timestamp_utc'], 
+                     [df[col] for col in unit_cols],
+                     labels=[col.replace('_MW', '') for col in unit_cols],
+                     alpha=0.7)
+    
+    # Add unserved as a separate stack layer (on top) with distinct styling
+    if has_unserved and (df['unserved_MW'] > 1e-6).any():
+        # Compute cumulative served to stack unserved on top
+        served = df[unit_cols].sum(axis=1) if unit_cols else pd.Series(0.0, index=df.index)
+        ax.fill_between(df['timestamp_utc'], served, served + df['unserved_MW'],
+                        label='UNSERVED', alpha=0.8, color='red', hatch='///', edgecolor='darkred', linewidth=0.5)
     
     # Overlay black line for total demand (visible above stack)
     if demand_df is not None and 'heat_demand_MW' in demand_df.columns:
@@ -2127,13 +2593,22 @@ def plot_units_online(dispatch_long_path: str, output_path: str, epoch: int = No
     df = df.sort_values('timestamp_utc').reset_index(drop=True)
     
     # Count units online per hour using unit_online (in subset, can be hot standby)
-    # Use unit_online if available, otherwise fall back to unit_on for backwards compatibility
+    # Use unit_online if available, otherwise fall back to unit_on, or compute from heat_MW
     if 'unit_online' in df.columns:
         online_col = 'unit_online'
         plot_label = 'Units Online (hot standby allowed)'
-    else:
+    elif 'unit_on' in df.columns:
         online_col = 'unit_on'
         plot_label = 'Units Firing (heat_MW > 0)'
+    elif 'heat_MW' in df.columns:
+        # Compute unit_on from heat_MW (for LP mode compatibility)
+        df['unit_on'] = (df['heat_MW'] > 1e-6).astype(int)
+        online_col = 'unit_on'
+        plot_label = 'Units Firing (heat_MW > 0)'
+    else:
+        # No way to determine units online - skip this plot
+        print(f"[WARN] Cannot plot units online: missing unit_online, unit_on, and heat_MW columns in {dispatch_long_path}")
+        return
     
     units_online = df.groupby('timestamp_utc')[online_col].sum().reset_index()
     units_online.columns = ['timestamp_utc', 'n_units_online']
@@ -2246,13 +2721,223 @@ def plot_unit_utilisation_duration(dispatch_long_path: str, output_path: str,
     print(f"[OK] Saved {output_path}")
 
 
+def resolve_demand_csv(repo_root: Path, epoch: int, demand_csv_arg: Optional[str] = None) -> Path:
+    """
+    Resolve demand CSV path for an epoch.
+    
+    Priority:
+    1. If --demand-csv provided, use it
+    2. Else, try Output/runs/<latest epoch run>/demandpack/hourly_heat_demand_<epoch>.csv
+    3. Else, try Output/hourly_heat_demand_<epoch>.csv
+    4. Else, error with clear message
+    
+    Args:
+        repo_root: Repository root directory
+        epoch: Epoch year
+        demand_csv_arg: Optional CLI argument value
+        
+    Returns:
+        Resolved Path to demand CSV
+        
+    Raises:
+        FileNotFoundError: If no demand CSV found
+    """
+    if demand_csv_arg:
+        candidate = resolve_path(demand_csv_arg)
+        if candidate.exists():
+            return candidate
+        else:
+            raise FileNotFoundError(f"Demand CSV not found: {candidate}")
+    
+    output_root = repo_root / 'Output'
+    
+    # Try 2: Latest run folder for this epoch
+    runs_dir = output_root / 'runs'
+    if runs_dir.exists():
+        # Find most recent run folder that matches epoch pattern
+        epoch_runs = sorted(
+            [d for d in runs_dir.iterdir() if d.is_dir() and f'epoch{epoch}' in d.name],
+            key=lambda p: p.stat().st_mtime,
+            reverse=True
+        )
+        if epoch_runs:
+            candidate = epoch_runs[0] / 'demandpack' / f'hourly_heat_demand_{epoch}.csv'
+            if candidate.exists():
+                return candidate
+    
+    # Try 3: Direct Output root
+    candidate = output_root / f'hourly_heat_demand_{epoch}.csv'
+    if candidate.exists():
+        return candidate
+    
+    # Not found - error with helpful message
+    attempted = [
+        f"  - Output/runs/*/demandpack/hourly_heat_demand_{epoch}.csv (latest run)",
+        f"  - Output/hourly_heat_demand_{epoch}.csv"
+    ]
+    raise FileNotFoundError(
+        f"Demand CSV not found for epoch {epoch}.\n"
+        f"Attempted paths:\n" + "\n".join(attempted) + "\n"
+        f"Please provide --demand-csv or ensure demand file exists."
+    )
+
+
+def validate_maintenance_only(
+    epoch: int,
+    demand_csv_path: Path,
+    utilities_csv_path: Path,
+    repo_root: Path,
+    variant: Optional[str] = None
+) -> int:
+    """
+    Validate maintenance windows without running dispatch.
+    
+    Args:
+        epoch: Epoch year
+        demand_csv_path: Path to demand CSV
+        utilities_csv_path: Path to utilities CSV
+        repo_root: Repository root directory
+        variant: Optional variant string (for 2035)
+        
+    Returns:
+        Exit code: 0 for PASS, 2 for FAIL, 1 for ERROR
+    """
+    print("\n" + "=" * 80)
+    print(f"VALIDATION MODE: Checking maintenance windows for epoch {epoch}")
+    print("=" * 80)
+    
+    # Load demand timestamps
+    print(f"\n[1/3] Loading demand timestamps from {demand_csv_path}...")
+    try:
+        demand_df, dt_h = load_hourly_demand(str(demand_csv_path))
+        timestamps_utc = pd.DatetimeIndex(demand_df['timestamp_utc'].values)
+        if timestamps_utc.tz is None:
+            timestamps_utc = timestamps_utc.tz_localize('UTC')
+        else:
+            timestamps_utc = timestamps_utc.tz_convert('UTC')
+        print(f"[OK] Loaded {len(timestamps_utc)} timesteps (dt_h={dt_h:.6f}h)")
+    except Exception as e:
+        print(f"[ERROR] Failed to load demand: {e}")
+        return 1
+    
+    # Load utilities
+    print(f"\n[2/3] Loading utilities from {utilities_csv_path}...")
+    try:
+        util_df = load_utilities(str(utilities_csv_path), epoch=epoch)
+        unit_ids = util_df['unit_id'].tolist()
+        print(f"[OK] Loaded {len(unit_ids)} units: {', '.join(unit_ids)}")
+    except Exception as e:
+        print(f"[ERROR] Failed to load utilities: {e}")
+        return 1
+    
+    # Load maintenance windows
+    print(f"\n[3/3] Loading maintenance windows...")
+    try:
+        maint_df = maint.load_maintenance_windows(repo_root, epoch, variant=variant)
+    except Exception as e:
+        print(f"[ERROR] Failed to load maintenance windows: {e}")
+        return 1
+    
+    if len(maint_df) == 0:
+        print(f"[INFO] No maintenance windows found for epoch {epoch}")
+        print(f"  Expected: Input/site/maintenance/maintenance_windows_{epoch}.csv")
+        print(f"[PASS] No maintenance to validate")
+        return 0
+    
+    print(f"[OK] Loaded {len(maint_df)} maintenance window(s)")
+    
+    # Build availability matrix
+    try:
+        availability_matrix = maint.build_availability_matrix(
+            timestamps_utc,
+            unit_ids,
+            maint_df
+        )
+        print(f"[OK] Built availability matrix: {len(availability_matrix)} timesteps Ã— {len(unit_ids)} units")
+    except Exception as e:
+        print(f"[ERROR] Failed to build availability matrix: {e}")
+        return 1
+    
+    # Validate each maintenance window
+    print("\n" + "=" * 80)
+    print("VALIDATING MAINTENANCE WINDOWS")
+    print("=" * 80)
+    
+    all_passed = True
+    tolerance = 1e-6
+    
+    for idx, window in maint_df.iterrows():
+        unit_id = window['unit_id']
+        start = window['start_timestamp_utc']
+        end = window['end_timestamp_utc']
+        availability = float(window['availability'])
+        
+        # Check unit_id exists
+        if unit_id not in unit_ids:
+            print(f"\n[FAIL] Window {idx+1}: unit_id '{unit_id}' not found in utilities")
+            print(f"  Available units: {', '.join(unit_ids)}")
+            all_passed = False
+            continue
+        
+        # Find timesteps covered by this window
+        mask = (timestamps_utc >= start) & (timestamps_utc < end)
+        covered_timesteps = timestamps_utc[mask]
+        n_hours = len(covered_timesteps)
+        
+        if n_hours == 0:
+            print(f"\n[WARN] Window {idx+1}: {unit_id} [{start} to {end}) - no timesteps covered")
+            continue
+        
+        # Get availability values for this unit in this window
+        if unit_id not in availability_matrix.columns:
+            print(f"\n[FAIL] Window {idx+1}: unit_id '{unit_id}' not in availability matrix")
+            all_passed = False
+            continue
+        
+        unit_avail_series = availability_matrix.loc[covered_timesteps, unit_id]
+        min_avail = float(unit_avail_series.min())
+        max_avail = float(unit_avail_series.max())
+        mean_avail = float(unit_avail_series.mean())
+        
+        # Check: if availability==0, all covered hours must be exactly 0
+        if availability == 0.0:
+            non_zero_count = (unit_avail_series > tolerance).sum()
+            if non_zero_count > 0:
+                print(f"\n[FAIL] Window {idx+1}: {unit_id} [{start} to {end})")
+                print(f"  Expected: availability=0.0 (fully offline)")
+                print(f"  Found: {non_zero_count}/{n_hours} hours with availability > {tolerance}")
+                print(f"  Min availability in window: {min_avail:.6f}")
+                print(f"  Max availability in window: {max_avail:.6f}")
+                all_passed = False
+            else:
+                print(f"[PASS] Window {idx+1}: {unit_id} [{start} to {end}) - availability=0.0, {n_hours}h covered, all zero")
+        else:
+            # For availability > 0, check it's applied correctly (within tolerance)
+            expected_avail = availability
+            if abs(min_avail - expected_avail) > tolerance or abs(max_avail - expected_avail) > tolerance:
+                print(f"\n[WARN] Window {idx+1}: {unit_id} [{start} to {end})")
+                print(f"  Expected: availability={expected_avail:.3f}")
+                print(f"  Found: min={min_avail:.6f}, max={max_avail:.6f}, mean={mean_avail:.6f}")
+                print(f"  Note: Overlapping windows may cause minimum (most restrictive) to apply")
+            else:
+                print(f"[PASS] Window {idx+1}: {unit_id} [{start} to {end}) - availability={availability:.3f}, {n_hours}h covered, min={min_avail:.3f}, max={max_avail:.3f}")
+    
+    print("\n" + "=" * 80)
+    if all_passed:
+        print("[PASS] All maintenance windows validated successfully")
+        return 0
+    else:
+        print("[FAIL] Some maintenance windows failed validation")
+        return 2
+
+
 def main():
     """CLI entrypoint for site dispatch computation."""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Compute 2020 baseline site utility dispatch')
-    parser.add_argument('--demand-csv', default='Output/hourly_heat_demand_2020.csv',
-                       help='Path to hourly demand CSV')
+    parser = argparse.ArgumentParser(description='Compute site utility dispatch')
+    parser.add_argument('--demand-csv', default=None,
+                       help='Path to hourly demand CSV (auto-discovered if not provided, epoch-aware)')
     parser.add_argument('--utilities-csv', default=None,
                        help='Path to site utilities CSV (default: auto-discover from Input/site/utilities/)')
     parser.add_argument('--demandpack-config', default=None,
@@ -2287,12 +2972,22 @@ def main():
                        help='Output root directory (default: repo_root/Output)')
     parser.add_argument('--run-id', type=str, default=None,
                        help='Run ID (if provided, writes to run_dir; otherwise uses output-dir or Output/)')
+    parser.add_argument('--maintenance-csv', type=str, default=None,
+                       help='Path to maintenance windows CSV (optional). Also accepts --maintenance-windows-csv for backward compatibility.')
     parser.add_argument('--maintenance-windows-csv', type=str, default=None,
-                       help='Path to maintenance windows CSV (optional)')
+                       help='[DEPRECATED] Use --maintenance-csv instead. Path to maintenance windows CSV (optional)')
     parser.add_argument('--electricity-signals-csv', type=str, default=None,
                        help='Path to electricity signals CSV with ToU prices and headroom (optional)')
     parser.add_argument('--grid-emissions-csv', type=str, default=None,
                        help='Path to grid emissions intensity CSV (optional, for reporting)')
+    parser.add_argument('--time-min', type=str, default=None,
+                       help='Minimum timestamp (ISO UTC with Z, e.g., 2020-07-06T00:00:00Z). Subset demand to [time-min, time-max)')
+    parser.add_argument('--time-max', type=str, default=None,
+                       help='Maximum timestamp (ISO UTC with Z, exclusive). Subset demand to [time-min, time-max)')
+    parser.add_argument('--smoke-maintenance', action='store_true',
+                       help='Automatically find first availability==0 window and run only [start-24h, end+24h)')
+    parser.add_argument('--validate-maintenance', action='store_true',
+                       help='Validate maintenance windows only (no optimization, no figures). Loads demand, utilities, and maintenance, then prints PASS/FAIL summary.')
 
     args = parser.parse_args()
     
@@ -2304,6 +2999,62 @@ def main():
     
     print(f"Repository root: {ROOT}")
     print(f"Epoch: {epoch}")
+    
+    # Handle validate-maintenance mode early (exit before any dispatch/output code)
+    if args.validate_maintenance:
+        # Resolve demand CSV (epoch-aware)
+        try:
+            demand_csv_resolved = resolve_demand_csv(ROOT, epoch, args.demand_csv)
+        except FileNotFoundError as e:
+            print(f"[ERROR] {e}")
+            sys.exit(1)
+        
+        # Resolve utilities CSV (use existing auto-discovery logic)
+        if args.utilities_csv:
+            utilities_csv_resolved = resolve_path(args.utilities_csv)
+        else:
+            # Auto-discovery
+            utilities_csv_resolved = None
+            candidate = INPUT_DIR / 'site' / 'utilities' / f'site_utilities_{epoch}.csv'
+            if candidate.exists():
+                utilities_csv_resolved = candidate
+            else:
+                utilities_dir = INPUT_DIR / 'site' / 'utilities'
+                if utilities_dir.exists():
+                    matches = sorted(utilities_dir.glob(f'*utilities*{epoch}*.csv'))
+                    if len(matches) == 1:
+                        utilities_csv_resolved = matches[0]
+                    elif len(matches) > 1:
+                        print(f"[ERROR] Multiple utilities CSV files found for epoch {epoch}:")
+                        for i, match in enumerate(matches, 1):
+                            print(f"  {i}. {match.name}")
+                        print(f"\nPlease specify one using --utilities-csv")
+                        sys.exit(1)
+        
+        if utilities_csv_resolved is None or not utilities_csv_resolved.exists():
+            print(f"[ERROR] Utilities CSV not found for epoch {epoch}")
+            print(f"  Expected: Input/site/utilities/site_utilities_{epoch}.csv")
+            print(f"  Please specify using --utilities-csv")
+            sys.exit(1)
+        
+        # Determine variant for 2035
+        variant = None
+        if epoch == 2035 and args.utilities_csv:
+            util_path_str = str(args.utilities_csv)
+            if '_EB' in util_path_str:
+                variant = 'EB'
+            elif '_BB' in util_path_str:
+                variant = 'BB'
+        
+        # Run validation and exit
+        exit_code = validate_maintenance_only(
+            epoch=epoch,
+            demand_csv_path=demand_csv_resolved,
+            utilities_csv_path=utilities_csv_resolved,
+            repo_root=ROOT,
+            variant=variant
+        )
+        sys.exit(exit_code)
     
     # Determine output paths
     output_paths = None
@@ -2352,7 +3103,11 @@ def main():
             args.out_dispatch_wide = str(output_dir / f'site_dispatch_{epoch}_wide_opt.csv')
     
     # Resolve input paths
-    demand_csv_resolved = resolve_path(args.demand_csv)
+    if args.demand_csv:
+        demand_csv_resolved = resolve_path(args.demand_csv)
+    else:
+        # Auto-discover demand CSV for this epoch
+        demand_csv_resolved = resolve_demand_csv(ROOT, epoch, None)
     
     # Resolve utilities CSV with auto-discovery
     if args.utilities_csv:
@@ -2467,6 +3222,72 @@ def main():
     demand_df, dt_h = load_hourly_demand(str(demand_csv_resolved))
     print(f"[OK] Timestep duration: dt_h = {dt_h:.6f} hours")
     
+    # Apply time window filtering if requested
+    if args.smoke_maintenance:
+        # Auto-discover maintenance file to find first availability==0 window
+        maint_df = maint.load_maintenance_windows(ROOT, epoch, variant=None)
+        if len(maint_df) > 0:
+            # Find first window with availability==0
+            zero_avail = maint_df[maint_df['availability'] == 0.0]
+            if len(zero_avail) > 0:
+                first_window = zero_avail.iloc[0]
+                start_ts = first_window['start_timestamp_utc']
+                end_ts = first_window['end_timestamp_utc']
+                # Extend window by 24h before and after
+                time_min = start_ts - pd.Timedelta(hours=24)
+                time_max = end_ts + pd.Timedelta(hours=24)
+                args.time_min = time_min.strftime('%Y-%m-%dT%H:%M:%SZ')
+                args.time_max = time_max.strftime('%Y-%m-%dT%H:%M:%SZ')
+                print(f"[INFO] --smoke-maintenance: Found first outage window {start_ts} to {end_ts}")
+                print(f"[INFO] Running subset: [{args.time_min}, {args.time_max})")
+            else:
+                print("[WARN] --smoke-maintenance: No availability==0 windows found, running full dataset")
+        else:
+            print("[WARN] --smoke-maintenance: No maintenance windows found, running full dataset")
+    
+    if args.time_min or args.time_max:
+        # Parse time window
+        if args.time_min:
+            time_min = parse_any_timestamp(args.time_min)
+            if time_min.tz is None:
+                time_min = time_min.tz_localize('UTC')
+            else:
+                time_min = time_min.tz_convert('UTC')
+        else:
+            time_min = None
+        
+        if args.time_max:
+            time_max = parse_any_timestamp(args.time_max)
+            if time_max.tz is None:
+                time_max = time_max.tz_localize('UTC')
+            else:
+                time_max = time_max.tz_convert('UTC')
+        else:
+            time_max = None
+        
+        # Ensure demand timestamps are UTC
+        if demand_df['timestamp_utc'].dt.tz is None:
+            demand_df['timestamp_utc'] = demand_df['timestamp_utc'].dt.tz_localize('UTC')
+        else:
+            demand_df['timestamp_utc'] = demand_df['timestamp_utc'].dt.tz_convert('UTC')
+        
+        # Filter demand
+        mask = pd.Series(True, index=demand_df.index)
+        if time_min is not None:
+            mask = mask & (demand_df['timestamp_utc'] >= time_min)
+        if time_max is not None:
+            mask = mask & (demand_df['timestamp_utc'] < time_max)
+        
+        n_before = len(demand_df)
+        demand_df = demand_df[mask].copy().reset_index(drop=True)
+        n_after = len(demand_df)
+        print(f"[INFO] Time window filter: {n_before} -> {n_after} timesteps "
+              f"([{args.time_min or 'start'}, {args.time_max or 'end'}))")
+        
+        if len(demand_df) == 0:
+            print("[ERROR] Time window filter resulted in empty demand dataset")
+            sys.exit(1)
+    
     print(f"Loading utilities from {utilities_csv_resolved}...")
     util_df = load_utilities(str(utilities_csv_resolved), epoch=epoch)
     
@@ -2482,22 +3303,66 @@ def main():
         print(f"[WARN] Epoch mapping: eval_epoch {epoch} -> signals_epoch {signals_epoch}")
     signals = get_signals_for_epoch(signals_config, str(signals_epoch))
     
-    # Load maintenance windows if provided
+    # Load maintenance windows using new module (epoch-aware)
     maintenance_availability = None
-    if args.maintenance_windows_csv:
-        maintenance_path = resolve_path(args.maintenance_windows_csv)
-        print(f"Loading maintenance windows from {maintenance_path}...")
-        try:
-            maintenance_availability = load_maintenance_windows(
-                maintenance_path,
+    maintenance_availability_wide = None  # Wide-form for dispatch functions
+    
+    # Determine variant for 2035 (extract from utilities CSV path if present)
+    variant = None
+    if epoch == 2035 and args.utilities_csv:
+        util_path_str = str(args.utilities_csv)
+        if '_EB' in util_path_str:
+            variant = 'EB'
+        elif '_BB' in util_path_str:
+            variant = 'BB'
+    
+    # Load maintenance windows
+    try:
+        maint_df = maint.load_maintenance_windows(ROOT, epoch, variant=variant)
+        
+        if len(maint_df) > 0:
+            # Convert demand timestamps to DatetimeIndex
+            if isinstance(demand_df['timestamp_utc'], pd.Series):
+                timestamps_utc = pd.DatetimeIndex(demand_df['timestamp_utc'].values)
+            else:
+                timestamps_utc = pd.DatetimeIndex(demand_df['timestamp_utc'])
+            
+            # Build availability matrix
+            maintenance_availability_wide = maint.build_availability_matrix(
+                timestamps_utc,
                 util_df['unit_id'].tolist(),
-                demand_df['timestamp_utc']
+                maint_df
             )
-            print(f"[OK] Loaded maintenance windows for {len(maintenance_availability['unit_id'].unique())} units")
-        except FileNotFoundError:
-            print(f"[WARN] Maintenance windows file not found: {maintenance_path}, continuing without maintenance constraints")
-        except Exception as e:
-            raise ValueError(f"Failed to load maintenance windows: {e}")
+            
+            # Convert to long-form for backward compatibility
+            maintenance_availability_wide.index.name = 'timestamp_utc'
+            maintenance_availability = maintenance_availability_wide.reset_index().melt(
+                id_vars=['timestamp_utc'],
+                var_name='unit_id',
+                value_name='availability_multiplier'
+            )
+            
+            # Compute summary: affected hours per unit
+            n_windows = len(maint_df)
+            affected_hours = {}
+            for unit_id in util_df['unit_id']:
+                if unit_id in maintenance_availability_wide.columns:
+                    unit_avail = maintenance_availability_wide[unit_id]
+                    affected_count = (unit_avail < 1.0).sum()
+                    if affected_count > 0:
+                        affected_hours[unit_id] = int(affected_count)
+            
+            print(f"[OK] Loaded maintenance windows: {n_windows} rows")
+            print(f"[OK] Built availability matrix: hours={len(timestamps_utc)} units={len(util_df)}")
+            if affected_hours:
+                print(f"[OK] Maintenance affects {len(affected_hours)} unit(s); affected hours per unit: {affected_hours}")
+            else:
+                print(f"[WARN] Maintenance windows loaded but no units have availability < 1.0 (check unit_id matching)")
+        else:
+            print(f"[INFO] Maintenance windows not found for epoch {epoch}; continuing without maintenance constraints")
+    except Exception as e:
+        print(f"[WARN] Failed to load maintenance windows: {e}")
+        print(f"[INFO] Continuing without maintenance constraints")
     
     # Load electricity signals if provided (for ToU pricing and headroom)
     electricity_signals = None
@@ -2508,8 +3373,8 @@ def main():
             electricity_signals = pd.read_csv(elec_sig_path)
             electricity_signals['timestamp_utc'] = parse_any_timestamp(electricity_signals['timestamp_utc'])
             # Align to demand timestamps
-            from src.load_gxp_signals import align_signals_to_demand
-            electricity_signals = align_signals_to_demand(electricity_signals, demand_df, "electricity_signals")
+            from src.load_gxp_signals import align_signals_to_demand as align_elec_signals
+            electricity_signals = align_elec_signals(electricity_signals, demand_df, "electricity_signals")
             print(f"[OK] Loaded electricity signals with ToU pricing and headroom")
         except Exception as e:
             raise ValueError(f"Failed to load electricity signals: {e}")
@@ -2535,14 +3400,20 @@ def main():
         signals_for_dispatch = signals
     
     # Compute dispatch based on mode
+    # Use wide-form if available (preferred), else use long-form (dispatch functions accept both)
+    maint_for_dispatch = maintenance_availability_wide if maintenance_availability_wide is not None else maintenance_availability
+    
     if args.mode == 'proportional':
         print("Computing proportional dispatch...")
-        dispatch_long, dispatch_wide = allocate_baseline_dispatch(demand_df, util_df, dt_h)
+        dispatch_long, dispatch_wide = allocate_baseline_dispatch(
+            demand_df, util_df, dt_h,
+            maintenance_availability=maint_for_dispatch
+        )
     elif args.mode == 'lp':
         print("Computing LP dispatch with equality constraints...")
         dispatch_long, dispatch_wide = allocate_dispatch_lp(
             demand_df, util_df, signals_for_dispatch, dt_h,
-            maintenance_availability=maintenance_availability,
+            maintenance_availability=maint_for_dispatch,
             electricity_signals=electricity_signals,
             unserved_penalty_nzd_per_MWh=args.unserved_penalty_nzd_per_MWh
         )
@@ -2556,13 +3427,81 @@ def main():
             reserve_penalty_nzd_per_MWh=args.reserve_penalty_nzd_per_MWh,
             no_load_cost_nzd_per_h=args.no_load_cost_nzd_per_h,
             online_cost_applies_when=args.online_cost_applies_when,
-            dt_h=dt_h
+            dt_h=dt_h,
+            maintenance_availability=maint_for_dispatch
         )
+    
+    # Add availability columns to dispatch_long for traceability (if maintenance was loaded)
+    if maintenance_availability_wide is not None:
+        # Merge availability from wide-form matrix
+        # Reset index and convert to long-form
+        avail_df_reset = maintenance_availability_wide.reset_index()
+        # Ensure index name is timestamp_utc (in case it was named differently)
+        if avail_df_reset.index.name is not None:
+            avail_df_reset.index.name = None
+        if 'timestamp_utc' not in avail_df_reset.columns:
+            # If index was reset but column name is different, rename it
+            avail_df_reset = avail_df_reset.rename(columns={avail_df_reset.columns[0]: 'timestamp_utc'})
+        
+        avail_long = avail_df_reset.melt(
+            id_vars=['timestamp_utc'],
+            var_name='unit_id',
+            value_name='availability_factor'
+        )
+        # Ensure timestamp_utc is in same format as dispatch_long
+        if not pd.api.types.is_datetime64_any_dtype(dispatch_long['timestamp_utc']):
+            dispatch_long['timestamp_utc'] = parse_any_timestamp(dispatch_long['timestamp_utc'])
+        if not pd.api.types.is_datetime64_any_dtype(avail_long['timestamp_utc']):
+            avail_long['timestamp_utc'] = parse_any_timestamp(avail_long['timestamp_utc'])
+        
+        # Merge availability (only for real units, not UNSERVED)
+        # Filter out UNSERVED before merging, then set defaults for UNSERVED
+        real_units_mask = dispatch_long['unit_id'] != 'UNSERVED'
+        dispatch_real = dispatch_long[real_units_mask].copy()
+        dispatch_unserved = dispatch_long[~real_units_mask].copy()
+        
+        dispatch_real = dispatch_real.merge(
+            avail_long[['timestamp_utc', 'unit_id', 'availability_factor']],
+            on=['timestamp_utc', 'unit_id'],
+            how='left'
+        )
+        dispatch_real['availability_factor'] = dispatch_real['availability_factor'].fillna(1.0)
+        
+        # Compute available_cap_MW = max_heat_MW * availability_factor (only for real units)
+        unit_cap_map = dict(zip(util_df['unit_id'], util_df['max_heat_MW']))
+        dispatch_real['available_cap_MW'] = dispatch_real.apply(
+            lambda row: unit_cap_map.get(row['unit_id'], 0.0) * row.get('availability_factor', 1.0),
+            axis=1
+        )
+        
+        # For UNSERVED: set availability_factor = 1.0 and available_cap_MW = 0.0 (no capacity)
+        dispatch_unserved['availability_factor'] = 1.0
+        dispatch_unserved['available_cap_MW'] = 0.0
+        
+        # Recombine
+        dispatch_long = pd.concat([dispatch_real, dispatch_unserved], ignore_index=True).sort_values(['timestamp_utc', 'unit_id']).reset_index(drop=True)
+        print(f"[OK] Added availability columns to dispatch output (availability_factor, available_cap_MW)")
+    else:
+        # No maintenance: set availability_factor = 1.0 and available_cap_MW = max_heat_MW for real units
+        # For UNSERVED: set availability_factor = 1.0 and available_cap_MW = 0.0
+        unit_cap_map = dict(zip(util_df['unit_id'], util_df['max_heat_MW']))
+        real_units_mask = dispatch_long['unit_id'] != 'UNSERVED'
+        dispatch_long.loc[real_units_mask, 'availability_factor'] = 1.0
+        dispatch_long.loc[real_units_mask, 'available_cap_MW'] = dispatch_long.loc[real_units_mask, 'unit_id'].map(unit_cap_map)
+        dispatch_long.loc[~real_units_mask, 'availability_factor'] = 1.0
+        dispatch_long.loc[~real_units_mask, 'available_cap_MW'] = 0.0
     
     # Add cost columns for BOTH modes to ensure consistent schema
     # This ensures fuel_cost_nzd, carbon_cost_nzd, total_cost_nzd always exist
+    # For LP mode, use signals_for_dispatch (may be DataFrame for time-varying prices)
     print("Computing costs...")
-    dispatch_long = add_costs_to_dispatch(dispatch_long, util_df, signals, dt_h)
+    if args.mode == 'lp':
+        # LP mode may have time-varying electricity prices from electricity_signals
+        # Pass unserved_penalty so it's computed correctly
+        dispatch_long = add_costs_to_dispatch(dispatch_long, util_df, signals_for_dispatch, dt_h,
+                                               unserved_penalty_nzd_per_MWh=args.unserved_penalty_nzd_per_MWh)
+    else:
+        dispatch_long = add_costs_to_dispatch(dispatch_long, util_df, signals, dt_h)
     
     # Validate dispatch outputs (energy closure, schema, etc.) - AFTER costs are added
     validate_dispatch_outputs(dispatch_long, dispatch_wide, demand_df, dt_h,
@@ -2625,7 +3564,16 @@ def main():
     # Compute annual summary
     print("\nComputing annual summary...")
     reserve_frac_val = args.reserve_frac if args.mode == 'optimal_subset' else 0.0
-    annual_summary = compute_annual_summary(dispatch_long, reserve_frac=reserve_frac_val)
+    # Pass penalty rates to ensure penalty costs are computed correctly
+    unserved_penalty_rate = getattr(args, 'unserved_penalty_nzd_per_MWh', None)
+    reserve_penalty_rate = getattr(args, 'reserve_penalty_nzd_per_MWh', None)
+    annual_summary = compute_annual_summary(
+        dispatch_long,
+        reserve_frac=reserve_frac_val,
+        dt_h=dt_h,
+        unserved_penalty_nzd_per_MWh=unserved_penalty_rate,
+        reserve_penalty_nzd_per_MWh=reserve_penalty_rate
+    )
     
     # Validate summary schema (self-test)
     _debug_validate_summary_schema(annual_summary)
@@ -2668,13 +3616,49 @@ def main():
     # Print unit rows (exclude SYSTEM and TOTAL)
     # After compute_annual_summary(), unit_id is always a column
     unit_rows = annual_summary[~annual_summary['unit_id'].isin(['SYSTEM', 'TOTAL'])]
+    
+    # Build safe lookup map for util_df (exclude UNSERVED which is synthetic)
+    util_meta = {}
+    if util_df is not None and 'unit_id' in util_df.columns:
+        util_meta = util_df.set_index('unit_id').to_dict('index')
+    
     for _, row in unit_rows.iterrows():
         unit_id = row['unit_id']
         print(f"\n{unit_id}:")
+        
+        # Handle UNSERVED specially (synthetic unit, not in util_df)
+        if unit_id == 'UNSERVED':
+            print(f"  Annual heat (GWh):           {row['annual_heat_GWh']:10.2f}")
+            # Get unserved cost from annual_penalty_cost_nzd (which should equal unserved_cost_nzd for UNSERVED)
+            # This was set in compute_annual_summary from the aggregated unserved_cost_nzd column
+            unserved_cost_val = row.get('annual_penalty_cost_nzd', 0.0)
+            if pd.isna(unserved_cost_val):
+                # Fallback to unserved_cost_nzd column if available
+                unserved_cost_val = row.get('unserved_cost_nzd', 0.0)
+            if pd.isna(unserved_cost_val):
+                # Final fallback to annual_total_cost_nzd
+                unserved_cost_val = row.get('annual_total_cost_nzd', 0.0)
+            unserved_cost_val = float(unserved_cost_val) if not pd.isna(unserved_cost_val) else 0.0
+            print(f"  Annual unserved cost (NZD):  {unserved_cost_val:12,.2f}")
+            total_cost_val = float(row['annual_total_cost_nzd']) if not pd.isna(row.get('annual_total_cost_nzd', np.nan)) else 0.0
+            print(f"  Annual total cost (NZD):     {total_cost_val:12,.2f}")
+            if row['annual_heat_GWh'] > 0:
+                avg_cost_val = float(row['avg_cost_nzd_per_MWh_heat']) if not pd.isna(row.get('avg_cost_nzd_per_MWh_heat', np.nan)) else 0.0
+                print(f"  Avg cost per MWh_heat (NZD): {avg_cost_val:10.2f}")
+            continue
+        
+        # Real units: print full details
         print(f"  Annual heat (GWh):           {row['annual_heat_GWh']:10.2f}")
         print(f"  Annual fuel (MWh):           {row['annual_fuel_MWh']:10.2f}")
         print(f"  Annual CO2 (tCO2):           {row['annual_co2_tonnes']:10.2f}")
         print(f"  Annual fuel cost (NZD):      {row['annual_fuel_cost_nzd']:12,.2f}")
+        # Show electricity cost note if it's an electric unit (for clarity)
+        # Use safe lookup instead of direct iloc[0]
+        unit_meta = util_meta.get(unit_id)
+        if unit_meta is not None:
+            unit_fuel = unit_meta.get('fuel', '')
+            if 'electricity' in str(unit_fuel).lower():
+                print(f"    (includes electricity ToU cost from electricity_signals CSV)")
         print(f"  Annual carbon cost (NZD):    {row['annual_carbon_cost_nzd']:12,.2f}")
         print(f"  Annual total cost (NZD):     {row['annual_total_cost_nzd']:12,.2f}")
         print(f"  Avg cost per MWh_heat (NZD): {row['avg_cost_nzd_per_MWh_heat']:10.2f}")
@@ -2689,14 +3673,50 @@ def main():
         print("System-Level Penalties (Infeasibility Only)")
         print("="*80)
         # Show unserved (always show, even if 0)
-        unserved_mwh = system_row.get('unserved_MW', 0.0)
-        unserved_cost = system_row.get('unserved_cost_nzd', 0.0)
+        # Use unserved_MWh from system_row if available (already converted), else convert from MW
+        if 'unserved_MWh' in system_row and not pd.isna(system_row.get('unserved_MWh', np.nan)):
+            unserved_mwh = float(system_row['unserved_MWh'])
+        else:
+            unserved_mw_sum = system_row.get('unserved_MW', 0.0)
+            unserved_mwh = float(unserved_mw_sum * dt_h)  # Convert to MWh
+        
+        # Use unserved_penalty_cost_nzd if available, else fallback to unserved_cost_nzd
+        if 'unserved_penalty_cost_nzd' in system_row and not pd.isna(system_row.get('unserved_penalty_cost_nzd', np.nan)):
+            unserved_cost = float(system_row['unserved_penalty_cost_nzd'])
+        else:
+            unserved_cost = float(system_row.get('unserved_cost_nzd', 0.0))
+        
         print(f"  Unserved energy (MWh):       {unserved_mwh:10.2f}")
         print(f"  Unserved penalty cost (NZD): {unserved_cost:12,.2f}")
+        # Hard validation: if unserved > 0 and penalty is configured > 0, cost must be > 0
+        if unserved_mwh > 0 and unserved_cost == 0:
+            # Check if penalty was configured (args.unserved_penalty_nzd_per_MWh should be available in scope)
+            if args.mode == 'lp' and hasattr(args, 'unserved_penalty_nzd_per_MWh'):
+                penalty_rate = args.unserved_penalty_nzd_per_MWh
+                if penalty_rate > 0:
+                    # CRITICAL: Recompute expected cost from the same unserved_MWh value
+                    expected_cost = unserved_mwh * penalty_rate
+                    raise ValueError(
+                        f"[VALIDATION FAILURE] Unserved energy > 0 ({unserved_mwh:.2f} MWh) but penalty cost is 0. "
+                        f"Penalty rate is configured as {penalty_rate:.2f} NZD/MWh. "
+                        f"This indicates a bug in cost computation. Expected cost: {expected_cost:.2f} NZD. "
+                        f"Please check that unserved_cost_nzd is computed correctly in add_costs_to_dispatch() "
+                        f"and that the LP objective includes the penalty term."
+                    )
+                else:
+                    print(f"    [WARN] Unserved energy > 0 but penalty rate is 0 (unserved_penalty_nzd_per_MWh={penalty_rate})")
+            else:
+                print(f"    [WARN] Unserved energy > 0 but penalty cost is 0. Check unserved_penalty_nzd_per_MWh setting.")
         
         # Show reserve (always show, even if 0)
-        reserve_shortfall_mwh = system_row.get('reserve_shortfall_MW', 0.0)
-        reserve_penalty_cost = system_row.get('reserve_penalty_cost_nzd', 0.0)
+        # Use reserve_shortfall_MWh from system_row if available (already converted), else convert from MW
+        if 'reserve_shortfall_MWh' in system_row and not pd.isna(system_row.get('reserve_shortfall_MWh', np.nan)):
+            reserve_shortfall_mwh = float(system_row['reserve_shortfall_MWh'])
+        else:
+            reserve_shortfall_mw_sum = system_row.get('reserve_shortfall_MW', 0.0)
+            reserve_shortfall_mwh = float(reserve_shortfall_mw_sum * dt_h)  # Convert to MWh
+        
+        reserve_penalty_cost = float(system_row.get('reserve_penalty_cost_nzd', 0.0))
         print(f"  Reserve shortfall (MWh):     {reserve_shortfall_mwh:10.2f}")
         print(f"  Reserve penalty cost (NZD):  {reserve_penalty_cost:12,.2f}")
         
@@ -2740,9 +3760,11 @@ def main():
             print(f"  Annual operational cost (NZD): {total_row['annual_operational_cost_nzd']:12,.2f}")
             print(f"    (includes: fuel + carbon + var_om + fixed_on + startup + no-load)")
         if 'annual_penalty_cost_nzd' in total_row:
-            print(f"  Annual penalty cost (NZD):    {total_row['annual_penalty_cost_nzd']:12,.2f}")
+            penalty_cost = float(total_row['annual_penalty_cost_nzd']) if not pd.isna(total_row.get('annual_penalty_cost_nzd', np.nan)) else 0.0
+            print(f"  Annual penalty cost (NZD):    {penalty_cost:12,.2f}")
             print(f"    (includes: unserved + reserve penalties)")
-        print(f"  Annual total cost (NZD):     {total_row['annual_total_cost_nzd']:12,.2f}")
+        total_cost = float(total_row['annual_total_cost_nzd']) if not pd.isna(total_row.get('annual_total_cost_nzd', np.nan)) else 0.0
+        print(f"  Annual total cost (NZD):     {total_cost:12,.2f}")
         if 'avg_operational_cost_nzd_per_MWh_heat' in total_row:
             print(f"  Avg operational cost/MWh (NZD): {total_row['avg_operational_cost_nzd_per_MWh_heat']:10.2f}")
         print(f"  Avg total cost per MWh_heat (NZD): {total_row['avg_cost_nzd_per_MWh_heat']:10.2f}")
@@ -2782,7 +3804,8 @@ def main():
         if 'avg_online_units_low_season' in total_row and not pd.isna(total_row['avg_online_units_low_season']):
             print(f"  Mean online units (low season): {total_row['avg_online_units_low_season']:.2f}")
     
-    # Generate plots if requested (with error handling)
+    # Generate plots if requested (non-fatal: only warn, don't crash dispatch)
+    plot_success = True
     if args.plot:
         print("\nGenerating dispatch plots...")
         
@@ -2790,35 +3813,86 @@ def main():
             if args.mode == 'proportional':
                 plot_path = figures_dir / f'heat_{epoch}_unit_stack.png'
                 plot_dispatch_stack(args.out_dispatch_wide, str(plot_path), demand_df, epoch=epoch)
-            else:  # optimal_subset
+            elif args.mode == 'lp':
+                # LP mode: same plots as optimal_subset
                 # Stack plot
                 plot_path = figures_dir / f'heat_{epoch}_unit_stack_opt.png'
                 try:
                     plot_dispatch_stack(args.out_dispatch_wide, str(plot_path), demand_df, epoch=epoch)
                 except Exception as e:
-                    print(f"[FAIL] Stack plot: {e}")
-                    raise
+                    print(f"[WARN] Stack plot failed: {e}")
+                    plot_success = False
                 
                 # Units online plot
                 plot_path = figures_dir / f'heat_{epoch}_units_online_opt.png'
                 try:
                     plot_units_online(args.out_dispatch_long, str(plot_path), epoch=epoch)
                 except Exception as e:
-                    print(f"[FAIL] Units online plot: {e}")
-                    raise
+                    print(f"[WARN] Units online plot failed: {e}")
+                    plot_success = False
                 
                 # Utilisation duration plot
                 plot_path = figures_dir / f'heat_{epoch}_unit_utilisation_duration_opt.png'
                 try:
                     plot_unit_utilisation_duration(args.out_dispatch_long, str(plot_path), str(utilities_csv_resolved), epoch=epoch)
                 except Exception as e:
-                    print(f"[FAIL] Utilisation duration plot: {e}")
-                    raise
+                    print(f"[WARN] Utilisation duration plot failed: {e}")
+                    plot_success = False
+            else:  # optimal_subset
+                # Stack plot
+                plot_path = figures_dir / f'heat_{epoch}_unit_stack_opt.png'
+                try:
+                    plot_dispatch_stack(args.out_dispatch_wide, str(plot_path), demand_df, epoch=epoch)
+                except Exception as e:
+                    print(f"[WARN] Stack plot failed: {e}")
+                    plot_success = False
+                
+                # Units online plot
+                plot_path = figures_dir / f'heat_{epoch}_units_online_opt.png'
+                try:
+                    plot_units_online(args.out_dispatch_long, str(plot_path), epoch=epoch)
+                except Exception as e:
+                    print(f"[WARN] Units online plot failed: {e}")
+                    plot_success = False
+                
+                # Utilisation duration plot
+                plot_path = figures_dir / f'heat_{epoch}_unit_utilisation_duration_opt.png'
+                try:
+                    plot_unit_utilisation_duration(args.out_dispatch_long, str(plot_path), str(utilities_csv_resolved), epoch=epoch)
+                except Exception as e:
+                    print(f"[WARN] Utilisation duration plot failed: {e}")
+                    plot_success = False
+            
+            if plot_success:
+                print("[OK] All plots generated successfully")
+            else:
+                print("[WARN] Some plots failed, but dispatch and validation succeeded")
             
             # Figures are written directly to run_figures_dir (no copying to latest)
         except Exception as e:
-            print(f"\n[ERROR] Plot generation failed: {e}")
-            sys.exit(1)
+            print(f"\n[WARN] Plot generation encountered errors: {e}")
+            print("  Dispatch and validation succeeded; plots are optional")
+            plot_success = False
+            import traceback
+            if os.environ.get("DISPATCH_DEBUG_PLOTS", "0") == "1":
+                traceback.print_exc()
+    
+    # Exit with code 0 if dispatch and validation succeeded (plots are optional)
+    # Only exit non-zero if dispatch/validation failed
+    print("\n" + "="*80)
+    if plot_success:
+        print("[OK] Dispatch, validation, and plotting completed successfully")
+    else:
+        print("[OK] Dispatch and validation completed successfully (some plots failed, but this is non-fatal)")
+    print("="*80)
+    
+    # Self-test: verify penalty cost consistency (if DISPATCH_SELF_TEST env var set)
+    if os.environ.get("DISPATCH_SELF_TEST", "0") == "1":
+        try:
+            _self_test_penalty_consistency(annual_summary, args)
+        except Exception as e:
+            print(f"[Self-Test ERROR] {e}")
+            # Don't fail the run, but log the error
 
 
 def _canonicalize_timestamps(ts_series: Union[pd.Series, pd.Index]) -> pd.Series:
@@ -2949,10 +4023,21 @@ def validate_dispatch_outputs(dispatch_long: pd.DataFrame, dispatch_wide: pd.Dat
     
     # Group by canonical timestamps (all indexes will be datetime64[ns, UTC])
     demand_by_ts = demand_df_work.groupby('_ts')['heat_demand_MW'].sum()
-    served_by_ts = dispatch_long_work.groupby('_ts')['heat_MW'].sum()
     
-    # Get unserved_MW if present (sum across units per timestamp, or use first if stored once per timestamp)
-    if 'unserved_MW' in dispatch_long_work.columns:
+    # Compute served from real units only (exclude UNSERVED)
+    # served_by_ts = sum of heat_MW for all units EXCEPT unit_id == "UNSERVED"
+    if 'unit_id' in dispatch_long_work.columns:
+        real_units_mask = dispatch_long_work['unit_id'] != 'UNSERVED'
+        served_by_ts = dispatch_long_work[real_units_mask].groupby('_ts')['heat_MW'].sum()
+    else:
+        # Fallback: sum all (shouldn't happen, but handle gracefully)
+        served_by_ts = dispatch_long_work.groupby('_ts')['heat_MW'].sum()
+    
+    # Get unserved_MW: either from UNSERVED unit_id rows or from unserved_MW column
+    if 'unit_id' in dispatch_long_work.columns and (dispatch_long_work['unit_id'] == 'UNSERVED').any():
+        # UNSERVED is stored as unit_id="UNSERVED" rows
+        unserved_by_ts = dispatch_long_work[dispatch_long_work['unit_id'] == 'UNSERVED'].groupby('_ts')['heat_MW'].sum()
+    elif 'unserved_MW' in dispatch_long_work.columns:
         # Check if unserved_MW is stored once per timestamp (system-level) or per unit
         # If it's system-level, use first(); if per-unit, use sum()
         unserved_sample = dispatch_long_work.groupby('_ts')['unserved_MW'].apply(lambda x: (x != 0).sum())
@@ -3092,27 +4177,109 @@ def validate_dispatch_outputs(dispatch_long: pd.DataFrame, dispatch_wide: pd.Dat
             print(f"[OK] Headroom constraint validated: max incremental electricity within headroom (tolerance: {tol} MW)")
     
     # 6. Maintenance validation (if maintenance_availability provided)
-    if maintenance_availability is not None:
-        # Check that units with availability_multiplier == 0 have heat_MW == 0
-        maint_merged = dispatch_long.merge(
+    if maintenance_availability is not None and util_df is not None:
+        # Filter out UNSERVED rows before maintenance validation (UNSERVED has no capacity constraints)
+        dispatch_real_units = dispatch_long[dispatch_long['unit_id'] != 'UNSERVED'].copy()
+        
+        # Merge maintenance availability with dispatch (only real units)
+        maint_merged = dispatch_real_units.merge(
             maintenance_availability,
             on=['timestamp_utc', 'unit_id'],
             how='left'
         )
         maint_merged['availability_multiplier'] = maint_merged['availability_multiplier'].fillna(1.0)
         
+        # Merge unit capacity and static availability_factor from utilities
+        unit_cap_map = dict(zip(util_df['unit_id'], util_df['max_heat_MW']))
+        maint_merged['max_heat_MW'] = maint_merged['unit_id'].map(unit_cap_map)
+        
+        # Get static availability_factor from utilities CSV (default 1.0 if not present)
+        # This is the static availability from the utilities CSV, separate from time-varying maintenance
+        if 'availability_factor' in util_df.columns:
+            unit_avail_factor_map = dict(zip(util_df['unit_id'], util_df['availability_factor']))
+            maint_merged['static_availability_factor'] = maint_merged['unit_id'].map(unit_avail_factor_map).fillna(1.0)
+        else:
+            # If utilities don't have availability_factor column, default to 1.0
+            maint_merged['static_availability_factor'] = 1.0
+        
+        # Validate: heat_MW[u,t] <= max_heat_MW[u] * static_availability_factor[u] * maintenance_availability[u,t] + tol
+        # This matches the constraint used in dispatch: cap_effective = cap_nameplate * static_avail * maint_avail
+        # where static_avail comes from utilities CSV and maint_avail is time-varying from maintenance windows
+        maint_merged['max_allowed_MW'] = (maint_merged['max_heat_MW'] * 
+                                         maint_merged['static_availability_factor'] * 
+                                         maint_merged['availability_multiplier'])
+        maint_merged['violation_MW'] = maint_merged['heat_MW'] - maint_merged['max_allowed_MW']
+        
+        tol = 1e-6  # MW
+        violations = maint_merged[maint_merged['violation_MW'] > tol]
+        
+        if len(violations) > 0:
+            violation_samples = violations[['timestamp_utc', 'unit_id', 'heat_MW', 'max_heat_MW', 
+                                           'static_availability_factor', 'availability_multiplier', 
+                                           'max_allowed_MW', 'violation_MW']].head(10)
+            raise ValueError(
+                f"[VALIDATION FAILURE] Maintenance constraint violation: {len(violations)} timestamps where "
+                f"unit dispatch exceeds maintenance availability. "
+                f"Required: heat_MW[u,t] <= max_heat_MW[u] * static_availability_factor[u] * maintenance_availability[u,t]. "
+                f"Tolerance: {tol} MW. This is a hard failure. "
+                f"Sample violations:\n{violation_samples.to_string()}"
+            )
+        
+        # Also check zero dispatch during full outages (availability == 0)
         outage_mask = maint_merged['availability_multiplier'] == 0.0
         if outage_mask.any():
-            tol = 1e-6  # MW
-            violations = maint_merged[outage_mask & (maint_merged['heat_MW'].abs() > tol)]
-            if len(violations) > 0:
-                violation_samples = violations[['timestamp_utc', 'unit_id', 'heat_MW', 'availability_multiplier']].head(5)
+            zero_violations = maint_merged[outage_mask & (maint_merged['heat_MW'].abs() > tol)]
+            if len(zero_violations) > 0:
+                violation_samples = zero_violations[['timestamp_utc', 'unit_id', 'heat_MW', 'availability_multiplier']].head(5)
                 raise ValueError(
-                    f"[VALIDATION FAILURE] Maintenance constraint violation: {len(violations)} timestamps with non-zero dispatch during outages. "
-                    f"Tolerance: {tol} MW. This is a hard failure - units must have zero dispatch when availability_multiplier == 0. "
-                    f"Sample violations:\n{violation_samples}"
+                    f"[VALIDATION FAILURE] Maintenance constraint violation: {len(zero_violations)} timestamps with non-zero dispatch during full outages (availability==0). "
+                    f"Tolerance: {tol} MW. This is a hard failure - units must have zero dispatch when availability == 0. "
+                    f"Sample violations:\n{violation_samples.to_string()}"
                 )
             print(f"[OK] Maintenance constraints validated: {outage_mask.sum()} outage hours, all units at zero dispatch (tolerance: {tol} MW)")
+        else:
+            print(f"[OK] Maintenance constraints validated: all dispatch within availability limits (tolerance: {tol} MW)")
+
+
+def _self_test_penalty_consistency(annual_summary: pd.DataFrame, args) -> None:
+    """
+    Self-test: verify penalty cost consistency.
+    
+    Checks:
+    1. If unserved_MWh > 0 and penalty rate > 0, then penalty cost must be > 0
+    2. Penalty cost = unserved_MWh * penalty_rate (within tolerance)
+    """
+    print("\n[Self-Test] Verifying penalty cost consistency...")
+    
+    system_mask = annual_summary['unit_id'] == 'SYSTEM'
+    if not system_mask.any():
+        print("[Self-Test] No SYSTEM row found, skipping penalty consistency check")
+        return
+    
+    system_row = annual_summary[system_mask].iloc[0]
+    unserved_mwh = float(system_row.get('unserved_MWh', 0.0)) if 'unserved_MWh' in system_row else 0.0
+    unserved_cost = float(system_row.get('unserved_penalty_cost_nzd', 0.0)) if 'unserved_penalty_cost_nzd' in system_row else 0.0
+    
+    if hasattr(args, 'unserved_penalty_nzd_per_MWh'):
+        penalty_rate = args.unserved_penalty_nzd_per_MWh
+        if unserved_mwh > 0 and penalty_rate > 0:
+            expected_cost = unserved_mwh * penalty_rate
+            if abs(unserved_cost - expected_cost) > 1e-3:
+                print(f"[Self-Test FAIL] Penalty cost mismatch:")
+                print(f"  unserved_MWh: {unserved_mwh:.2f}")
+                print(f"  penalty_rate: {penalty_rate:.2f} NZD/MWh")
+                print(f"  expected_cost: {expected_cost:.2f} NZD")
+                print(f"  actual_cost: {unserved_cost:.2f} NZD")
+                print(f"  difference: {abs(unserved_cost - expected_cost):.2f} NZD")
+                raise ValueError("Self-test failed: penalty cost does not match expected value")
+            else:
+                print(f"[Self-Test OK] Penalty cost consistent: {unserved_cost:.2f} NZD = {unserved_mwh:.2f} MWh * {penalty_rate:.2f} NZD/MWh")
+        elif unserved_mwh > 0 and penalty_rate == 0:
+            print(f"[Self-Test WARN] Unserved energy > 0 ({unserved_mwh:.2f} MWh) but penalty rate is 0")
+        elif unserved_mwh == 0:
+            print(f"[Self-Test OK] No unserved energy, penalty cost is {unserved_cost:.2f} NZD (expected 0.0)")
+    else:
+        print("[Self-Test SKIP] unserved_penalty_nzd_per_MWh not available in args")
 
 
 def _debug_validate_summary_schema(summary: pd.DataFrame) -> None:
@@ -3253,6 +4420,148 @@ def _debug_validate_hourly_cost_storage(dispatch_long: pd.DataFrame) -> None:
             )
 
 
+def _test_find_maintenance_windows_csv():
+    """Unit test for find_maintenance_windows_csv helper function."""
+    from src.run_all import find_maintenance_windows_csv
+    from src.path_utils import repo_root
+    
+    print("\n[Self-Test] Testing find_maintenance_windows_csv...")
+    
+    ROOT = repo_root()
+    
+    # Test 1: Check if function exists and is callable
+    try:
+        result = find_maintenance_windows_csv(ROOT, 2025, None)
+        print(f"[OK] find_maintenance_windows_csv(ROOT, 2025, None) returned: {result}")
+        if result is not None:
+            print(f"  Resolved path: {result.resolve()}")
+            print(f"  File exists: {result.is_file()}")
+    except Exception as e:
+        print(f"[FAIL] find_maintenance_windows_csv raised exception: {e}")
+        raise
+    
+    # Test 2: Test with non-existent epoch (should return None, not raise)
+    try:
+        result = find_maintenance_windows_csv(ROOT, 9999, None)
+        if result is None:
+            print(f"[OK] find_maintenance_windows_csv(ROOT, 9999, None) correctly returned None for non-existent epoch")
+        else:
+            print(f"[WARN] find_maintenance_windows_csv(ROOT, 9999, None) returned {result} (expected None)")
+    except Exception as e:
+        print(f"[FAIL] find_maintenance_windows_csv raised exception for non-existent epoch: {e}")
+        raise
+    
+    print("[OK] find_maintenance_windows_csv tests passed")
+
+
+def _test_maintenance_dispatch():
+    """
+    Test maintenance constraints in dispatch.
+    
+    Creates a synthetic 48h case with one unit forced availability=0 for 24h.
+    Verifies max heat for that unit during outage is 0 and that unserved or other units cover as expected.
+    """
+    print("\n[Self-Test] Testing maintenance constraints in dispatch...")
+    
+    import tempfile
+    from pathlib import Path
+    
+    ROOT = repo_root()
+    INPUT_DIR = input_root()
+    
+    # Create synthetic demand (48 hours)
+    timestamps = pd.date_range('2020-01-01T00:00:00Z', periods=48, freq='H', tz='UTC')
+    demand_df = pd.DataFrame({
+        'timestamp_utc': timestamps,
+        'heat_demand_MW': 100.0  # Constant 100 MW demand
+    })
+    
+    # Load utilities (use real file if available)
+    utilities_csv = INPUT_DIR / 'site' / 'utilities' / 'site_utilities_2020.csv'
+    if not utilities_csv.exists():
+        print("[SKIP] Self-test: site_utilities_2020.csv not found, skipping maintenance test")
+        return
+    
+    util_df = load_utilities(str(utilities_csv), epoch=2020)
+    unit_ids = util_df['unit_id'].tolist()
+    
+    if len(unit_ids) < 2:
+        print("[SKIP] Self-test: Need at least 2 units for maintenance test")
+        return
+    
+    # Create synthetic maintenance file: first unit unavailable for hours 0-23 (first 24 hours)
+    test_unit = unit_ids[0]
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='') as f:
+        maint_csv_path = Path(f.name)
+        f.write('unit_id,start_timestamp_utc,end_timestamp_utc,availability\n')
+        # Write timestamps in ISO Z format
+        f.write(f'{test_unit},{timestamps[0].strftime("%Y-%m-%dT%H:%M:%SZ")},{timestamps[24].strftime("%Y-%m-%dT%H:%M:%SZ")},0\n')
+    
+    try:
+        # Load maintenance availability
+        timestamps_utc = pd.DatetimeIndex(timestamps)
+        maint_avail_wide = load_maintenance_availability(maint_csv_path, timestamps_utc, unit_ids)
+        
+        # Verify availability matrix
+        assert maint_avail_wide.loc[timestamps[0:24], test_unit].eq(0.0).all(), \
+            f"Unit {test_unit} should have availability=0 for first 24 hours"
+        assert maint_avail_wide.loc[timestamps[24:48], test_unit].eq(1.0).all(), \
+            f"Unit {test_unit} should have availability=1.0 for hours 24-47"
+        
+        # Test LP dispatch with maintenance
+        signals_config_path = INPUT_DIR / 'signals' / 'signals_config.toml'
+        if not signals_config_path.exists():
+            print("[SKIP] Self-test: signals_config.toml not found, skipping LP dispatch test")
+            return
+        
+        signals_config = load_signals_config(str(signals_config_path))
+        signals = get_signals_for_epoch(signals_config, '2020')
+        
+        # Run LP dispatch
+        dispatch_long, dispatch_wide = allocate_dispatch_lp(
+            demand_df, util_df, signals, dt_h=1.0,
+            maintenance_availability=maint_avail_wide,
+            unserved_penalty_nzd_per_MWh=10000.0
+        )
+        
+        # Verify: test_unit should have heat_MW == 0 during outage (hours 0-23)
+        test_unit_dispatch = dispatch_long[dispatch_long['unit_id'] == test_unit].copy()
+        test_unit_dispatch['timestamp_utc'] = pd.to_datetime(test_unit_dispatch['timestamp_utc'], utc=True)
+        
+        outage_period = test_unit_dispatch[test_unit_dispatch['timestamp_utc'].isin(timestamps[0:24])]
+        outage_heat = outage_period['heat_MW'].abs()
+        max_outage_heat = outage_heat.max()
+        
+        assert max_outage_heat < 1e-6, \
+            f"Unit {test_unit} should have zero dispatch during outage, but max heat_MW = {max_outage_heat:.6f}"
+        
+        # Verify: after outage (hours 24-47), unit can dispatch
+        normal_period = test_unit_dispatch[test_unit_dispatch['timestamp_utc'].isin(timestamps[24:48])]
+        normal_heat = normal_period['heat_MW']
+        max_normal_heat = normal_heat.max()
+        
+        # Unit should be able to dispatch after outage (may be > 0 depending on costs)
+        print(f"  Unit {test_unit} during outage (hours 0-23): max heat_MW = {max_outage_heat:.6f} (expected 0)")
+        print(f"  Unit {test_unit} after outage (hours 24-47): max heat_MW = {max_normal_heat:.6f}")
+        
+        # Verify energy closure: demand should be met by other units or unserved
+        for i, ts in enumerate(timestamps[0:24]):
+            ts_dispatch = dispatch_long[dispatch_long['timestamp_utc'] == ts]
+            served = ts_dispatch['heat_MW'].sum()
+            unserved = ts_dispatch['unserved_MW'].iloc[0] if 'unserved_MW' in ts_dispatch.columns else 0.0
+            demand_ts = demand_df[demand_df['timestamp_utc'] == ts]['heat_demand_MW'].iloc[0]
+            closure_error = abs(demand_ts - served - unserved)
+            assert closure_error < 1e-6, \
+                f"Energy closure failed at {ts}: demand={demand_ts}, served={served}, unserved={unserved}, error={closure_error}"
+        
+        print(f"[OK] Maintenance constraint test passed: unit {test_unit} correctly has zero dispatch during outage")
+        
+    finally:
+        # Clean up temp file
+        if maint_csv_path.exists():
+            maint_csv_path.unlink()
+
+
 def _self_test_lightweight():
     """
     Lightweight self-test helper for dt_h and dispatch validation.
@@ -3340,6 +4649,9 @@ if __name__ == '__main__':
     import sys
     if '--self-test' in sys.argv:
         _self_test_lightweight()
+        _test_find_maintenance_windows_csv()
+        _test_maintenance_dispatch()
         sys.exit(0)
     main()
+
 

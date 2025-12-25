@@ -248,6 +248,125 @@ def find_utilities_csv(INPUT_DIR: Path, epoch: int, demandpack_config_path: Path
     raise FileNotFoundError(f"Utilities CSV not found for epoch {epoch}")
 
 
+def find_maintenance_windows_csv(repo_root: Path, epoch: int, variant: str = None) -> Path | None:
+    """
+    Find maintenance windows CSV file, handling both .csv and .csv.csv extensions.
+    
+    Args:
+        repo_root: Repository root directory (contains Input/)
+        epoch: Epoch year (e.g., 2025)
+        variant: Optional variant string (e.g., "EB", "BB" for 2035)
+    
+    Returns:
+        Path to maintenance file if found, None otherwise
+    
+    Looks for:
+        - maintenance_windows_{epoch}.csv (preferred)
+        - maintenance_windows_{epoch}.csv.csv (fallback)
+        - maintenance_windows_{epoch}_{variant}.csv (for 2035 variants)
+        - maintenance_windows_{epoch}_{variant}.csv.csv (for 2035 variants, fallback)
+    
+    If both .csv and .csv.csv exist, prefers .csv.
+    """
+    maintenance_dir = repo_root / 'Input' / 'site' / 'maintenance'
+    maintenance_dir = maintenance_dir.resolve()  # Absolute path
+    
+    def sanitize_path(path_str_or_path) -> Path:
+        """Sanitize path string by removing quotes and whitespace."""
+        if isinstance(path_str_or_path, Path):
+            return path_str_or_path.resolve()
+        
+        # Convert to string and strip quotes/whitespace
+        s = str(path_str_or_path).strip()
+        # Remove leading/trailing single or double quotes
+        s = s.strip("'").strip('"').strip()
+        # Convert to Path and resolve
+        return Path(s).resolve()
+    
+    # Build candidate paths (try variant-specific first for 2035)
+    candidates = []
+    if variant:
+        # For 2035 variants: try variant-specific first
+        candidates.append(maintenance_dir / f'maintenance_windows_{epoch}_{variant}.csv')
+        candidates.append(maintenance_dir / f'maintenance_windows_{epoch}_{variant}.csv.csv')
+        # Fallback to epoch-only
+        candidates.append(maintenance_dir / f'maintenance_windows_{epoch}.csv')
+        candidates.append(maintenance_dir / f'maintenance_windows_{epoch}.csv.csv')
+    else:
+        # For non-variant epochs: try epoch-specific
+        candidates.append(maintenance_dir / f'maintenance_windows_{epoch}.csv')
+        candidates.append(maintenance_dir / f'maintenance_windows_{epoch}.csv.csv')
+    
+    # Try each candidate with sanitization and is_file() check
+    # Prefer .csv over .csv.csv if both exist
+    found_single_csv = None
+    found_double_csv = None
+    
+    for candidate_raw in candidates:
+        candidate = sanitize_path(candidate_raw)
+        if candidate.is_file():
+            if candidate.suffix == '.csv':
+                # Single .csv extension - prefer this
+                found_single_csv = candidate
+            elif candidate.suffixes == ['.csv', '.csv']:
+                # Double .csv.csv extension - fallback
+                found_double_csv = candidate
+    
+    # Return single .csv if found, else double .csv.csv, else None
+    if found_single_csv is not None:
+        print(f"[OK] Found maintenance windows: {found_single_csv}")
+        return found_single_csv
+    elif found_double_csv is not None:
+        print(f"[OK] Found maintenance windows (double extension): {found_double_csv}")
+        return found_double_csv
+    
+    # Fallback: scan directory for case-insensitive match
+    if maintenance_dir.exists() and maintenance_dir.is_dir():
+        expected_name = f'maintenance_windows_{epoch}'
+        if variant:
+            expected_name = f'maintenance_windows_{epoch}_{variant}'
+        
+        print(f"[INFO] Direct path check failed, scanning directory for: {expected_name}.csv")
+        for file_path in maintenance_dir.iterdir():
+            if file_path.is_file():
+                file_name_lower = file_path.name.lower()
+                # Try both .csv and .csv.csv
+                expected_single = expected_name.lower() + '.csv'
+                expected_double = expected_name.lower() + '.csv.csv'
+                
+                if file_name_lower == expected_single:
+                    resolved = file_path.resolve()
+                    print(f"[OK] Using maintenance windows (found via scan): {resolved}")
+                    return resolved
+                elif file_name_lower == expected_double:
+                    resolved = file_path.resolve()
+                    print(f"[OK] Using maintenance windows (found via scan, double extension): {resolved}")
+                    return resolved
+        
+        # Also try epoch-only fallback for variants during scan
+        if variant:
+            expected_name_epoch = f'maintenance_windows_{epoch}'
+            print(f"[INFO] Variant-specific not found, scanning for: {expected_name_epoch}.csv")
+            for file_path in maintenance_dir.iterdir():
+                if file_path.is_file():
+                    file_name_lower = file_path.name.lower()
+                    expected_single = expected_name_epoch.lower() + '.csv'
+                    expected_double = expected_name_epoch.lower() + '.csv.csv'
+                    
+                    if file_name_lower == expected_single:
+                        resolved = file_path.resolve()
+                        print(f"[OK] Using maintenance windows (found via scan, epoch fallback): {resolved}")
+                        return resolved
+                    elif file_name_lower == expected_double:
+                        resolved = file_path.resolve()
+                        print(f"[OK] Using maintenance windows (found via scan, epoch fallback, double extension): {resolved}")
+                        return resolved
+    
+    # Not found - this is OK, maintenance is optional
+    print(f"[INFO] Maintenance windows not found for epoch {epoch}" + (f" variant {variant}" if variant else "") + "; continuing without maintenance constraints")
+    return None
+
+
 def run_single_epoch(epoch: int, batch_run_id: str, args, INPUT_DIR: Path, ROOT: Path, 
                      MODULES_DIR: Path, OUTPUT_DIR: Path, variant: str = None):
     """
@@ -447,21 +566,96 @@ def run_single_epoch(epoch: int, batch_run_id: str, args, INPUT_DIR: Path, ROOT:
     
     success_dict['plot'] = plot_success
     
-    # Step 4: Run optimal subset dispatch with plots
+    # Step 3B: Load GXP hourly and create electricity_signals CSV
+    signals_dir = run_dir / 'signals'
+    signals_dir.mkdir(parents=True, exist_ok=True)
+    
+    electricity_signals_path = None
+    grid_emissions_path = None
+    
+    try:
+        from src.load_gxp_signals import load_gxp_hourly, load_grid_emissions_intensity, align_signals_to_demand
+        
+        # Load GXP hourly data
+        print(f"Step 2: Loading GXP hourly data for epoch {epoch}...")
+        gxp_hourly = load_gxp_hourly(epoch, MODULES_DIR)
+        
+        # Load demand to align signals
+        demand_df_for_align = pd.read_csv(demand_csv)
+        demand_df_for_align['timestamp_utc'] = pd.to_datetime(demand_df_for_align['timestamp_utc'], utc=True)
+        
+        # Align GXP signals to demand timestamps
+        electricity_signals_aligned = align_signals_to_demand(gxp_hourly, demand_df_for_align, "GXP hourly")
+        
+        # Write electricity_signals CSV
+        epoch_variant_label = f"{epoch}_{variant}" if variant else str(epoch)
+        electricity_signals_path = signals_dir / f'electricity_signals_{epoch_variant_label}.csv'
+        electricity_signals_for_csv = electricity_signals_aligned.copy()
+        electricity_signals_for_csv['timestamp_utc'] = electricity_signals_for_csv['timestamp_utc'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+        electricity_signals_for_csv.to_csv(electricity_signals_path, index=False)
+        print(f"[OK] Created electricity signals: {electricity_signals_path}")
+        
+        # Load grid emissions intensity (optional)
+        try:
+            grid_emissions = load_grid_emissions_intensity(epoch, MODULES_DIR)
+            grid_emissions_aligned = align_signals_to_demand(grid_emissions, demand_df_for_align, "grid emissions")
+            
+            grid_emissions_path = signals_dir / f'grid_emissions_intensity_{epoch_variant_label}.csv'
+            grid_emissions_for_csv = grid_emissions_aligned.copy()
+            grid_emissions_for_csv['timestamp_utc'] = grid_emissions_for_csv['timestamp_utc'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+            grid_emissions_for_csv.to_csv(grid_emissions_path, index=False)
+            print(f"[OK] Created grid emissions intensity: {grid_emissions_path}")
+        except FileNotFoundError:
+            print(f"[INFO] Grid emissions intensity file not found for epoch {epoch}, skipping")
+        except Exception as e:
+            print(f"[WARN] Failed to load grid emissions intensity: {e}, continuing without it")
+            
+    except FileNotFoundError as e:
+        print(f"[WARN] GXP hourly file not found for epoch {epoch}: {e}")
+        print("  Continuing without electricity signals (dispatch will use flat prices)")
+    except Exception as e:
+        print(f"[WARN] Failed to load GXP signals: {e}")
+        print("  Continuing without electricity signals (dispatch will use flat prices)")
+    
+    # Step 3C: Auto-discover maintenance windows (robust path resolution with fallback scan)
+    maintenance_windows_path = find_maintenance_windows_csv(INPUT_DIR, epoch, variant)
+    
+    # Ensure absolute path is passed to dispatch
+    if maintenance_windows_path is not None:
+        maintenance_windows_path = maintenance_windows_path.resolve()  # Ensure absolute
+        print(f"[OK] Maintenance windows resolved to absolute path: {maintenance_windows_path}")
+    
+    # Step 4: Run dispatch (use LP mode for coupling, fallback to optimal_subset)
+    # Use LP mode to ensure equality constraints and fix 2035_BB bug
+    dispatch_mode = 'lp'  # Use LP mode for coupling stage
+    
     dispatch_cmd = [
         sys.executable, '-m', 'src.site_dispatch_2020',
-        '--mode', 'optimal_subset',
+        '--mode', dispatch_mode,
         '--epoch', str(epoch),
         '--plot',
-        '--no-load-cost-nzd-per-h', '50.0',
         '--demand-csv', demand_csv,
         '--utilities-csv', str(utilities_csv_path),
         '--output-root', str(OUTPUT_DIR),
-        '--run-id', run_id
+        '--run-id', run_id,
+        '--unserved-penalty-nzd-per-MWh', '10000.0'  # VOLL for LP mode
     ]
     
     # Pass through demandpack-config
     dispatch_cmd.extend(['--demandpack-config', str(demandpack_config_path)])
+    
+    # Add electricity signals if available
+    if electricity_signals_path and electricity_signals_path.exists():
+        dispatch_cmd.extend(['--electricity-signals-csv', str(electricity_signals_path)])
+    
+    # Add maintenance windows if available (use absolute resolved path)
+    if maintenance_windows_path is not None:
+        dispatch_cmd.extend(['--maintenance-csv', str(maintenance_windows_path)])
+        print(f"[OK] Passing maintenance windows to dispatch: {maintenance_windows_path}")
+    
+    # Add grid emissions if available (for reporting)
+    if grid_emissions_path and grid_emissions_path.exists():
+        dispatch_cmd.extend(['--grid-emissions-csv', str(grid_emissions_path)])
     
     dispatch_success = run_command(
         dispatch_cmd,
@@ -477,11 +671,16 @@ def run_single_epoch(epoch: int, batch_run_id: str, args, INPUT_DIR: Path, ROOT:
         print(f"[WARN] Dispatch step failed for epoch {epoch} (run_id={run_id})")
         print("  Continuing to next step...")
     
-    # Step 5: Run regional electricity PoC (if GXP file exists)
-    incremental_path = run_dir / f'site_electricity_incremental_{epoch}.csv'
+    # Step 4B: Incremental electricity export is handled by site_dispatch_2020.py
+    # It writes to Output/runs/<run_id>/signals/incremental_electricity_MW_<epoch>.csv
+    
+    # Step 5: Run regional electricity PoC (optional, deprecated - GXP signals used directly)
+    # Note: For coupling stage, we use GXP signals directly, so regional PoC is optional
+    epoch_variant_label = f"{epoch}_{variant}" if variant else str(epoch)
+    incremental_path = signals_dir / f'incremental_electricity_MW_{epoch_variant_label}.csv'
     regional_success = None
     
-    if gxp_csv_path.exists():
+    if gxp_csv_path.exists() and incremental_path.exists():
         regional_output = str(run_dir / f'regional_electricity_signals_{epoch}.csv')
         cmd = [sys.executable, '-m', 'src.regional_electricity_poc',
                '--epoch', str(epoch),
@@ -681,3 +880,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+

@@ -29,6 +29,9 @@ python -m src.run_all --epoch 2035 --utilities-csv Input/site/utilities/site_uti
 
 # With clean/archive options
 python -m src.run_all --epoch 2020 --clean --archive
+
+# Run all epochs and variants (recommended for full pipeline)
+python -m src.run_all --epochs "2020,2025,2028,2035" --variants-2035 "EB,BB" --archive
 ```
 
 ### Backward-Compatible 2020 Pipeline
@@ -73,9 +76,104 @@ Input/
   factors/          # Factor files (daily_factors.csv, seasonal_factors.csv, weekday_factors.csv)
   signals/          # Signals configuration (signals_config.toml, epochs_register.csv, etc.)
   site/             # Site-related CSVs (site_annual.csv, utilities/, etc.)
+    utilities/      # Site utilities CSV files (site_utilities_<epoch>.csv, site_utilities_2035_EB.csv, etc.)
+    maintenance/   # Planned maintenance windows (optional, one file per epoch/variant)
   uncertainty/      # Uncertainty scenarios
   weather/          # Weather data files
 ```
+
+### Maintenance Windows (Optional)
+
+Planned maintenance outages can be specified via CSV files in `Input/site/maintenance/`:
+
+- `maintenance_windows_2020.csv`
+- `maintenance_windows_2025.csv`
+- `maintenance_windows_2028.csv`
+- `maintenance_windows_2035_EB.csv`
+- `maintenance_windows_2035_BB.csv`
+
+**Schema:**
+```csv
+unit_id,start_timestamp_utc,end_timestamp_utc,availability
+CB1,2020-06-01T00:00:00Z,2020-06-07T23:59:59Z,0
+CB2,2020-12-15T00:00:00Z,2020-12-20T23:59:59Z,0
+```
+
+**Column Definitions:**
+- `unit_id`: Unit identifier (must match utilities CSV)
+- `start_timestamp_utc`: Start of maintenance window (ISO-8601 UTC with Z suffix)
+- `end_timestamp_utc`: End of maintenance window (ISO-8601 UTC with Z suffix, exclusive)
+- `availability`: 0 = unit unavailable (outage), 1 = unit available
+
+**Auto-Discovery:**
+The pipeline automatically discovers maintenance files using robust path resolution:
+- Uses absolute paths with `.is_file()` check (not just `.exists()`)
+- Falls back to case-insensitive directory scan if exact match not found
+- For non-variant epochs (2020/2025/2028): `Input/site/maintenance/maintenance_windows_{epoch}.csv`
+- For 2035 variants (EB/BB):
+  1. First tries: `maintenance_windows_2035_{variant}.csv`
+  2. Falls back to: `maintenance_windows_2035.csv`
+- Logs `[OK] Using maintenance windows: <ABS_PATH>` when found
+- Logs `[INFO] Maintenance windows missing: <ABS_PATH>` when not found
+- If a maintenance file is missing, all units are assumed available (no outages)
+
+**Dispatch Model Enforcement:**
+The dispatch model enforces: `heat_MW[u,t] <= max_heat_MW[u] * availability_multiplier[u,t]` where `availability_multiplier` is 0.0 during outages, 1.0 otherwise.
+
+### Grid Upgrade Options (Regional Module)
+
+The regional electricity module (`src/regional_electricity_poc.py`) supports discrete grid capacity upgrade options to minimize total cost (upgrade cost + shed cost).
+
+**Configuration File:** `Input/signals/grid_upgrades.toml`
+
+**Schema:**
+```toml
+[[upgrades]]
+capacity_MW = 0
+annual_cost_nzd = 0.0
+# Default: no upgrade (baseline)
+
+[[upgrades]]
+capacity_MW = 10
+annual_cost_nzd = 50000.0
+# Example: 10 MW upgrade at $50k/year
+
+[[upgrades]]
+capacity_MW = 20
+annual_cost_nzd = 90000.0
+# Example: 20 MW upgrade at $90k/year
+```
+
+**Usage:**
+```bash
+# Regional module with upgrade options (auto-discovers grid_upgrades.toml)
+python -m src.regional_electricity_poc --epoch 2025 \
+  --gxp-csv modules/edendale_gxp/outputs_latest/gxp_hourly_2025.csv \
+  --incremental-csv Output/runs/<run_id>/signals/incremental_electricity_MW_2025.csv \
+  --upgrades-config Input/signals/grid_upgrades.toml \
+  --voll 10000.0
+
+# Or use default path (Input/signals/grid_upgrades.toml)
+python -m src.regional_electricity_poc --epoch 2025 \
+  --gxp-csv modules/edendale_gxp/outputs_latest/gxp_hourly_2025.csv \
+  --incremental-csv Output/runs/<run_id>/signals/incremental_electricity_MW_2025.csv
+```
+
+**Output Columns:**
+- `upgrade_selected_MW`: Selected upgrade capacity (MW)
+- `upgrade_annual_cost_nzd`: Annual cost of selected upgrade (NZD/year)
+- `headroom_effective_MW`: Effective headroom after upgrade (base + upgrade)
+- `shed_MW`: Shed demand (should be ~0 if upgrade selected)
+- `shed_MWh`: Shed energy (should be ~0 if upgrade selected)
+
+**Decision Logic:**
+For each hour, the module chooses the upgrade option that minimizes:
+```
+total_cost = upgrade_hourly_cost + shed_MWh * VOLL
+```
+where `upgrade_hourly_cost = annual_cost_nzd / 8760` (prorated to hourly).
+
+If no upgrade options are configured or the file is missing, the module defaults to no upgrade (baseline behavior).
 
 ### Config File Selection
 
@@ -141,7 +239,7 @@ python -m src.plot_demandpack_diagnostics --data Output/hourly_heat_demand_2025.
 
 ## Computing Site Dispatch
 
-The dispatch module supports two modes and auto-discovers the utilities CSV file:
+The dispatch module supports three modes and auto-discovers the utilities CSV file:
 
 ### Utilities CSV Auto-Discovery
 

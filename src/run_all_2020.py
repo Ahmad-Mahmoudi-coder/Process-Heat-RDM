@@ -1,6 +1,10 @@
 """
-Backward-compatible wrapper for 2020 epoch pipeline.
+DEPRECATED: This script is a backward-compatibility wrapper.
+Use src.run_all with --epoch 2020 instead.
 
+This script will be moved to scripts/legacy/ in a future update.
+
+Backward-compatible wrapper for 2020 epoch pipeline.
 This is a thin wrapper that calls run_all.py with --epoch 2020.
 For new code, use: python -m src.run_all --epoch 2020
 """

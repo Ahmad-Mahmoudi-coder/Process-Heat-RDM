@@ -1,0 +1,146 @@
+# configs/rdm_experiment_2035_EB.toml
+# RDM experiment definition for 2035_EB (high electrification stress test).
+# Philosophy: keep PoC minimal — uncertainties target the binding interface:
+# incremental electricity ↔ GXP headroom ↔ upgrade menu ↔ shed/VOLL costs.
+
+[experiment]
+name = "rdm_2035_EB_grid_upgrade"
+epoch_tag = "2035_EB"
+description = "RDM over grid upgrade choices for Edendale 2035 electrification (EB variant)."
+sampling = "lhs"          # lhs | sobol | random
+n_futures = 200           # increase later if needed (e.g., 500–2000)
+seed = 42
+dt_h = 1.0                # must match your time series (8760*1h)
+
+# If your orchestrator supports it, you can choose whether each strategy is
+# an explicit forced choice, or "auto-select" (the module minimises cost).
+# For PoC DMDU, I recommend FORCE to compute regret curves cleanly.
+[strategy_settings]
+default_mode = "force"    # force | auto_select
+allow_auto_select = true  # keep true; can include an "AUTO" strategy below
+
+[paths]
+# Baseline headroom series (from Edendale_GXP outputs)
+headroom_csv = "C:/Model/Edendale GXP/outputs_latest/gxp_hourly_2035.csv"
+headroom_col = "headroom_mw"
+timestamp_col = "timestamp_utc"
+
+# Incremental electricity demand from site dispatch (EB variant)
+incremental_csv = "Output/runs/<BUNDLE>/epoch2035_EB/dispatch_prop_v2/signals/incremental_electricity_MW_2035_EB.csv"
+incremental_col = "incremental_electricity_MW"
+
+# Upgrade menu (RETA + PoC opt4)
+upgrade_menu_toml = "Input/configs/grid_upgrades_southland_edendale.toml"
+
+# Signals config (optional: used only if you later pull VOLL or tariffs from signals)
+signals_config_toml = "Input/signals/signals_config.toml"
+signals_epoch_key = "2035"  # note: your signals_config epochs are 2020/2024/2027/2035
+
+[decision_levers]
+# These are the “L” in XLRM. Map directly to upgrade_menu_toml names.
+# force_upgrade_name must match the "name" field in the upgrade TOML.
+# If mode="auto_select", you ignore force_upgrade_name and let the module pick.
+
+[[strategies]]
+strategy_id = "S0_NONE"
+mode = "force"
+force_upgrade_name = "none"
+label = "No upgrade (allow shedding)"
+
+[[strategies]]
+strategy_id = "S1_OPT1"
+mode = "force"
+force_upgrade_name = "fonterra_opt1_N_plus21MW"
+label = "RETA opt1 (+21 MW, N)"
+
+[[strategies]]
+strategy_id = "S2_OPT2"
+mode = "force"
+force_upgrade_name = "fonterra_opt2_N-1_plus32MW"
+label = "RETA opt2 (+32 MW, N-1)"
+
+[[strategies]]
+strategy_id = "S3_OPT3"
+mode = "force"
+force_upgrade_name = "fonterra_opt3_N_plus97MW"
+label = "RETA opt3 (+97 MW, N)"
+
+[[strategies]]
+strategy_id = "S4_OPT4"
+mode = "force"
+force_upgrade_name = "fonterra_opt4_N_plus150MW"
+label = "PoC extension (+150 MW, beyond RETA)"
+
+[[strategies]]
+strategy_id = "S_AUTO"
+mode = "auto_select"
+label = "Auto-select upgrade (min cost)"
+
+# “X” uncertainties — keep PoC tight: 4–5 is enough.
+# Your orchestrator applies these to inputs BEFORE running regional module.
+# supported kinds below are suggestions; implement as you prefer.
+# - scalar_multiplier: multiply a column or parameter by sampled value
+# - additive: add sampled value (e.g., MW)
+# - discrete: choose from options
+
+[[uncertainties]]
+u_id = "U_inc_mult"
+kind = "scalar_multiplier"
+target = "incremental_series"
+bounds = [0.85, 1.15]
+notes = "Captures uncertainty in electrification intensity / demand growth affecting incremental MW."
+
+[[uncertainties]]
+u_id = "U_headroom_mult"
+kind = "scalar_multiplier"
+target = "headroom_series"
+bounds = [0.70, 1.00]
+notes = "Captures tighter headroom due to regional competition, outages, forecast error."
+
+[[uncertainties]]
+u_id = "U_upgrade_capex_mult"
+kind = "scalar_multiplier"
+target = "upgrade_capex_nzd"
+bounds = [0.80, 1.50]
+notes = "Screening-level capex uncertainty; applies to all menu options (except none)."
+
+[[uncertainties]]
+u_id = "U_voll"
+kind = "discrete"
+target = "voll_nzd_per_MWh"
+options = [5000.0, 10000.0, 15000.0, 20000.0]
+notes = "Value of lost load; strongly influences shed-vs-upgrade economics."
+
+[[uncertainties]]
+u_id = "U_consents_uplift"
+kind = "scalar_multiplier"
+target = "consents_uplift_factor"
+bounds = [1.00, 1.60]
+notes = "Captures consenting/easement and delivery risk; multiplies annualised cost."
+
+[metrics]
+# “M” performance measures — for robust satisficing + regret.
+# The orchestrator should compute these from:
+# - selected_upgrade JSON (annualised cost, total cost, max_exceed_MW, annual_shed_MWh)
+# - grid_shed CSV (optional cross-check)
+# and (optionally) site summary outputs if you aggregate full system cost.
+
+# Primary outcomes
+compute_total_cost = true
+compute_regret = true
+regret_baseline = "per_future_min"   # per_future_min | fixed_strategy_id
+
+# Acceptability thresholds (satisficing)
+shed_MWh_max = 0.1                  # strict feasibility (or set small tolerance)
+max_exceed_MW_max = 0.01            # MW tolerance (matches your validate-only guard)
+
+# Additional reporting metrics
+report_quantiles = [0.05, 0.50, 0.95]
+save_long_timeseries = false        # PoC: keep false; enable later if needed
+
+[outputs]
+output_root = "Output/runs/<BUNDLE>/epoch2035_EB/dispatch_prop_v2/rdm"
+save_run_ledger = true
+save_per_future_strategy_json = true
+save_summary_csv = true
+summary_csv_name = "rdm_summary_2035_EB.csv"

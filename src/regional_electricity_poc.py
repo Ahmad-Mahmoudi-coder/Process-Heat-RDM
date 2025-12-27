@@ -170,47 +170,94 @@ def load_incremental_demand(incremental_path: str, gxp_timestamps: pd.Series,
 # load_tariff is no longer needed - tariff comes from GXP file
 
 
-def load_grid_upgrades(upgrades_config_path: str = None) -> list[dict]:
+def load_grid_upgrades(upgrades_config_path: str = None) -> tuple[list[dict], dict]:
     """
-    Load grid upgrade options from TOML config.
+    Load grid upgrade options from TOML config and compute annualised costs using CRF.
     
     Expected format in grid_upgrades.toml:
+    [assumptions]
+    real_discount_rate = 0.07
+    asset_life_years = 40
+    consents_uplift_factor = 1.25
+    
     [[upgrades]]
+    name = "none"
     capacity_MW = 0
-    annual_cost_nzd = 0.0
+    capex_nzd = 0.0
+    lead_time_months = 0
+    security_level = "existing"
     
-    [[upgrades]]
-    capacity_MW = 10
-    annual_cost_nzd = 50000.0
-    
-    Returns list of upgrade options sorted by capacity_MW (ascending).
+    Returns tuple of (upgrade_options list, assumptions dict)
     """
     if upgrades_config_path is None:
-        # Default to Input/signals/grid_upgrades.toml
-        upgrades_config_path = input_root() / 'signals' / 'grid_upgrades.toml'
+        # Default to Input/configs/grid_upgrades_southland_edendale.toml
+        upgrades_config_path = input_root() / 'configs' / 'grid_upgrades_southland_edendale.toml'
+        # Fallback to old location if new one doesn't exist
+        if not upgrades_config_path.exists():
+            upgrades_config_path = input_root() / 'signals' / 'grid_upgrades.toml'
     else:
         upgrades_config_path = resolve_path(upgrades_config_path)
     
     if not upgrades_config_path.exists():
         # Return default: no upgrade option
-        return [{'capacity_MW': 0, 'annual_cost_nzd': 0.0}]
+        return [{'name': 'none', 'capacity_MW': 0, 'capex_nzd': 0.0, 'annualised_cost_nzd': 0.0,
+                 'lead_time_months': 0, 'security_level': 'NA'}], {}
     
     with open(upgrades_config_path, 'rb') as f:
         config = tomllib.load(f)
     
+    # Load assumptions
+    assumptions = config.get('assumptions', {})
+    real_discount_rate = float(assumptions.get('real_discount_rate', 0.07))
+    asset_life_years = float(assumptions.get('asset_life_years', 40))
+    consents_uplift_factor = float(assumptions.get('consents_uplift_factor', 1.25))
+    
+    # Compute CRF (Capital Recovery Factor)
+    # CRF = r*(1+r)^n / ((1+r)^n - 1)
+    r = real_discount_rate
+    n = asset_life_years
+    if r > 0 and n > 0:
+        crf = (r * (1 + r)**n) / ((1 + r)**n - 1)
+    else:
+        crf = 1.0 / n if n > 0 else 0.0
+    
+    assumptions['CRF'] = crf
+    
     upgrades = config.get('upgrades', [])
     if not upgrades:
-        return [{'capacity_MW': 0, 'annual_cost_nzd': 0.0}]
+        return [{'name': 'none', 'capacity_MW': 0, 'capex_nzd': 0.0, 'annualised_cost_nzd': 0.0,
+                 'lead_time_months': 0, 'security_level': 'NA'}], assumptions
     
-    # Validate and sort by capacity
+    # Validate and compute annualised costs
     validated = []
     for upgrade in upgrades:
-        if 'capacity_MW' not in upgrade or 'annual_cost_nzd' not in upgrade:
-            print(f"[WARN] Skipping invalid upgrade option: {upgrade}")
+        # Required fields
+        if 'capacity_MW' not in upgrade:
+            print(f"[WARN] Skipping invalid upgrade option (missing capacity_MW): {upgrade.get('name', 'unknown')}")
             continue
+        
+        capacity_MW = float(upgrade['capacity_MW'])
+        
+        # Handle both old format (annual_cost_nzd) and new format (capex_nzd)
+        if 'capex_nzd' in upgrade:
+            capex_nzd = float(upgrade['capex_nzd'])
+            # Compute annualised cost: capex * CRF * consents_uplift_factor
+            annualised_cost_nzd = capex_nzd * crf * consents_uplift_factor
+        elif 'annual_cost_nzd' in upgrade:
+            # Old format: use annual_cost_nzd directly
+            annualised_cost_nzd = float(upgrade['annual_cost_nzd'])
+            capex_nzd = annualised_cost_nzd / (crf * consents_uplift_factor) if crf > 0 else 0.0
+        else:
+            print(f"[WARN] Skipping invalid upgrade option (missing capex_nzd or annual_cost_nzd): {upgrade.get('name', 'unknown')}")
+            continue
+        
         validated.append({
-            'capacity_MW': float(upgrade['capacity_MW']),
-            'annual_cost_nzd': float(upgrade['annual_cost_nzd'])
+            'name': str(upgrade.get('name', f'upgrade_{capacity_MW}MW')),
+            'capacity_MW': capacity_MW,
+            'capex_nzd': capex_nzd,
+            'annualised_cost_nzd': annualised_cost_nzd,
+            'lead_time_months': int(upgrade.get('lead_time_months', 0)),
+            'security_level': str(upgrade.get('security_level', 'NA'))
         })
     
     # Sort by capacity (ascending)
@@ -218,9 +265,86 @@ def load_grid_upgrades(upgrades_config_path: str = None) -> list[dict]:
     
     # Ensure zero option exists
     if validated[0]['capacity_MW'] != 0:
-        validated.insert(0, {'capacity_MW': 0, 'annual_cost_nzd': 0.0})
+        validated.insert(0, {'name': 'none', 'capacity_MW': 0, 'capex_nzd': 0.0, 'annualised_cost_nzd': 0.0,
+                             'lead_time_months': 0, 'security_level': 'NA'})
     
-    return validated
+    return validated, assumptions
+
+
+def select_annual_upgrade(headroom_base: pd.Series, incremental_MW: pd.Series, 
+                          upgrade_options: list[dict], voll_nzd_per_MWh: float = 10000.0,
+                          dt_h: float = 1.0) -> dict:
+    """
+    Select optimal grid upgrade for entire year based on annualised cost + shed cost.
+    
+    PoC assumption: upgrades available instantly upon selection; lead_time_months retained 
+    for reporting/planning extensions (ignored in decision feasibility).
+    
+    For each upgrade option k:
+    - headroom_eff_t = headroom_base_t + capacity_MW_k
+    - shed_MW_t = max(0, incremental_MW_t - headroom_eff_t)
+    - annual_shed_MWh = sum(shed_MW_t * dt_h)
+    - total_cost = annualised_cost_nzd + (annual_shed_MWh * VOLL_nzd_per_MWh)
+    
+    Selects option with minimum total cost.
+    
+    Args:
+        headroom_base: Series of baseline headroom (MW) per timestep
+        incremental_MW: Series of incremental electricity demand (MW) per timestep
+        upgrade_options: List of upgrade option dicts (from load_grid_upgrades)
+        voll_nzd_per_MWh: Value of lost load (NZD per MWh)
+        dt_h: Timestep duration in hours (default 1.0)
+    
+    Returns:
+        dict with keys: name, capacity_MW, capex_nzd, annualised_cost_nzd, 
+                       annual_shed_MWh, total_cost_nzd, lead_time_months, security_level
+    """
+    # Validate inputs
+    if len(headroom_base) != len(incremental_MW):
+        raise ValueError(f"headroom_base and incremental_MW must have same length: {len(headroom_base)} vs {len(incremental_MW)}")
+    
+    if len(headroom_base) == 0:
+        raise ValueError("Empty time series provided")
+    
+    best_option = None
+    best_total_cost = float('inf')
+    
+    # Evaluate each upgrade option
+    for upgrade in upgrade_options:
+        capacity_MW = float(upgrade['capacity_MW'])
+        annualised_cost_nzd = float(upgrade.get('annualised_cost_nzd', upgrade.get('annual_cost_nzd', 0.0)))
+        
+        # Effective headroom with this upgrade
+        headroom_eff = headroom_base + capacity_MW
+        
+        # Compute shed per timestep: max(0, incremental_MW - headroom_eff)
+        shed_MW = (incremental_MW - headroom_eff).clip(lower=0.0)
+        
+        # Annual shed energy (MWh)
+        annual_shed_MWh = (shed_MW * dt_h).sum()
+        
+        # Total cost: annualised upgrade cost + shed cost
+        shed_cost_nzd = annual_shed_MWh * voll_nzd_per_MWh
+        total_cost_nzd = annualised_cost_nzd + shed_cost_nzd
+        
+        # Track best option
+        if total_cost_nzd < best_total_cost:
+            best_total_cost = total_cost_nzd
+            best_option = {
+                'name': upgrade.get('name', 'unknown'),
+                'capacity_MW': capacity_MW,
+                'capex_nzd': upgrade.get('capex_nzd', 0.0),
+                'annualised_cost_nzd': annualised_cost_nzd,
+                'annual_shed_MWh': float(annual_shed_MWh),
+                'total_cost_nzd': float(total_cost_nzd),
+                'lead_time_months': upgrade.get('lead_time_months', 0),
+                'security_level': upgrade.get('security_level', 'NA')
+            }
+    
+    if best_option is None:
+        raise ValueError("No valid upgrade option found")
+    
+    return best_option
 
 
 def choose_optimal_upgrade(incremental_demand_MW: float, headroom_MW: float,

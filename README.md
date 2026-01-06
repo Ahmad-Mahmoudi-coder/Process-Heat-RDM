@@ -4,6 +4,86 @@ This repository contains the synthetic hourly heat demand generator and PoC site
 
 The DemandPack generator produces synthetic hourly heat demand profiles for 2020 using annual targets, seasonal factors, weekday patterns, and hourly profiles. The baseline implementation supports minimal but defensible PoC demand generation to support later site dispatch and electrification epochs.
 
+## PoC Quickstart
+
+**Canonical bundle example:** `poc_20260105_115401`
+
+### Running Dispatch for All Epochs
+
+```bash
+# Run dispatch for 2025, 2028, 2035_EB, and 2035_BB
+python -m src.site_dispatch_2020 --epoch 2025 --mode proportional --demand-csv Output/runs/poc_20260105_115401/epoch2025/demandpack/demandpack/hourly_heat_demand_2025.csv --output-root Output --run-id poc_20260105_115401/epoch2025/dispatch_prop_v2_capfix1
+
+python -m src.site_dispatch_2020 --epoch 2028 --mode proportional --demand-csv Output/runs/poc_20260105_115401/epoch2028/demandpack/demandpack/hourly_heat_demand_2028.csv --output-root Output --run-id poc_20260105_115401/epoch2028/dispatch_prop_v2_capfix1
+
+python -m src.site_dispatch_2020 --epoch 2035_EB --mode proportional --demand-csv Output/runs/poc_20260105_115401/epoch2035_EB/demandpack/demandpack/hourly_heat_demand_2035.csv --output-root Output --run-id poc_20260105_115401/epoch2035_EB/dispatch_prop_v2_capfix1
+
+python -m src.site_dispatch_2020 --epoch 2035_BB --mode proportional --demand-csv Output/runs/poc_20260105_115401/epoch2035_BB/demandpack/demandpack/hourly_heat_demand_2035.csv --output-root Output --run-id poc_20260105_115401/epoch2035_BB/dispatch_prop_v2_capfix1
+```
+
+### Generating KPI Table
+
+```bash
+# KPI table is produced by the KPI export command (if available)
+# Output location: Output/runs/poc_20260105_115401/kpi_table_capfix1.csv
+# Note: This file is kept as-is and not modified by the PoC pipeline
+```
+
+### Running Pathway Comparator
+
+```bash
+# Compare EB vs BB pathways (using default paths)
+python -m src.compare_pathways_2035 --bundle poc_20260105_115401 --output-root Output
+
+# Or with explicit run paths
+python -m src.compare_pathways_2035 --bundle poc_20260105_115401 --eb-run epoch2035_EB/dispatch_prop_v2_capfix1 --bb-run epoch2035_BB/dispatch_prop_v2_capfix1 --output-root Output
+```
+
+This creates:
+- `Output/runs/poc_20260105_115401/compare_pathways_2035_EB_vs_BB.csv`
+
+### Running RDM Screening
+
+```bash
+# Run RDM screening for EB pathway
+python -m src.run_rdm_2035 --bundle poc_20260105_115401 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB --output-root Output
+
+# Run RDM screening for BB pathway
+python -m src.run_rdm_2035 --bundle poc_20260105_115401 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_BB --output-root Output
+
+# Create comparison (after both runs)
+python -m src.run_rdm_2035 --bundle poc_20260105_115401 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB --output-root Output --create-comparison
+```
+
+This creates:
+- `Output/runs/poc_20260105_115401/rdm/rdm_summary_2035_EB.csv`
+- `Output/runs/poc_20260105_115401/rdm/rdm_summary_2035_BB.csv`
+- `Output/runs/poc_20260105_115401/rdm/rdm_compare_2035_EB_vs_BB.csv` (if `--create-comparison` is used)
+
+**Note:** Both EB and BB RDM summaries use the **same paired futures** from `Input/rdm/futures_2035.csv` to ensure fair comparison.
+
+### Smoke Tests
+
+```bash
+# Validate that TOTAL rows exist in dispatch summaries
+python -m src.compare_pathways_2035 --bundle poc_20260105_115401 --output-root Output
+
+# Validate that EB and BB RDM summaries use paired futures (runs automatically after both summaries exist)
+python -m src.run_rdm_2035 --bundle poc_20260105_115401 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB --output-root Output --create-comparison
+```
+
+## 2035_BB Pathway Assumptions
+
+The 2035_BB (Biomass Boiler) pathway uses the following assumptions:
+
+- **Biomass fuel cost basis:** Defined in `Input/site/utilities/site_utilities_2035_BB.csv` (fuel_cost_nzd_per_GJ column)
+- **Biomass CO2 factor:** Defined in utilities CSV (co2_tonnes_per_GJ column). Biomass is typically treated as carbon-neutral (0 tonnes CO2/GJ) for reporting, but may have upstream emissions factored in.
+- **ETS price:** Used for carbon cost calculation. Defined in dispatch configuration or signals config.
+
+**Reporting vs Constraints:**
+- **Physically constrained:** Heat demand, unit capacities, maintenance windows, fuel availability
+- **Reporting-only:** CO2 emissions and carbon costs (used for comparison but do not affect dispatch quantities)
+
 ## Running Scripts
 
 **Recommended usage** (from repository root):
@@ -175,6 +255,82 @@ where `upgrade_hourly_cost = annual_cost_nzd / 8760` (prorated to hourly).
 
 If no upgrade options are configured or the file is missing, the module defaults to no upgrade (baseline behavior).
 
+## Robust Decision Making (RDM) Experiments
+
+The RDM module (`src/run_rdm.py`) evaluates grid upgrade strategies across uncertain futures using Latin Hypercube Sampling (LHS) for continuous uncertainties and uniform sampling for discrete uncertainties.
+
+### Running RDM Experiments
+
+```bash
+# Basic run with experiment config
+python -m src.run_rdm --config Input/configs/rdm_experiment_2035_EB.toml --bundle TEST_run --n-futures 100
+
+# With clean output directory
+python -m src.run_rdm --config Input/configs/rdm_experiment_2035_EB.toml --bundle TEST_run --n-futures 100 --clean
+
+# Dry run (creates output directory and metadata, then exits)
+python -m src.run_rdm --config Input/configs/rdm_experiment_2035_EB.toml --bundle TEST_run --dry-run
+```
+
+### Output Files
+
+RDM experiments generate outputs in `Output/runs/<BUNDLE>/epoch<epoch_tag>/dispatch_prop_v2/rdm/<experiment_name>/`:
+
+- `config_used.toml`: Copy of experiment configuration
+- `run_metadata.json`: Run metadata (config paths, timestamps)
+- `futures.csv`: Sampled uncertainty futures (one row per future)
+- `rdm_summary_<epoch_tag>.csv`: Results for all future-strategy combinations
+- `robust_summary.json`: Aggregated statistics (quantiles, regret, satisficing)
+- `run_ledger.jsonl`: Minimal provenance per run
+- `figures/`: Generated plots
+  - `regret_cdf.png`: Step ECDF of regret by strategy (rescaled to billions NZD)
+  - `total_cost_boxplot.png`: Boxplot of total cost by strategy (rescaled to billions NZD)
+  - `total_cost_boxplot_excl_none.png`: Boxplot excluding S0_NONE strategy
+  - `shed_hist.png`: Histogram of annual shed energy by strategy
+  - `shed_fraction_hist.png`: Histogram of shed fraction by strategy
+
+### Key Metrics
+
+**Regret:**
+- Computed as difference between strategy cost and minimum cost in each future
+- Regret is computed against ALL strategies (including AUTO) for reference
+- Best strategies (minimax regret, max satisficing) exclude `auto_select` strategies by default
+- AUTO strategies are treated as ex-post optimum benchmarks (not implementable strategies)
+
+**Satisficing:**
+- Whether strategy meets constraints:
+  - `annual_shed_MWh <= shed_MWh_max` (default: 0.0)
+  - `max_exceed_MW <= max_exceed_MW_max` (default: 0.01)
+  - `shed_fraction <= shed_fraction_max` (optional, if specified in config)
+
+**Derived Metrics:**
+- `annual_incremental_MWh`: Total incremental electricity demand (after uncertainty transforms)
+- `shed_fraction`: `annual_shed_MWh / annual_incremental_MWh` (fraction of demand that cannot be served)
+- `p95_exceed_MW`: 95th percentile of exceedance across timesteps
+
+**Quantiles:**
+- p05/p50/p95 of total_cost and annual_shed_MWh by strategy
+
+### Configuration
+
+Experiment configs are TOML files with sections:
+- `[experiment]`: name, epoch_tag, n_futures, seed, sampling, dt_h
+- `[paths]`: headroom_csv, incremental_csv, upgrade_menu_toml, etc.
+- `[[strategies]]`: strategy_id, mode (force|auto_select), force_upgrade_name (optional), label
+- `[[uncertainties]]`: u_id, kind, target, bounds/options
+- `[metrics]`: thresholds and reporting options
+- `[outputs]`: output_root, save flags
+
+**Optional metrics fields in `[metrics]`:**
+- `shed_MWh_max` (default: 0.0): Maximum annual shed energy in MWh
+- `max_exceed_MW_max` (default: 0.01): Maximum exceedance in MW
+- `shed_fraction_max` (optional): Maximum shed fraction (0-1)
+- `exclude_auto_from_ranking` (default: true): Exclude auto_select strategies from robust ranking
+
+**Optional path fields in `[paths]`:**
+- `signals_config_toml` (optional): Path to signals config (not required for deterministic core)
+- `signals_epoch_key` (optional): Epoch key for signals lookup (not required)
+
 ### Config File Selection
 
 When multiple demandpack configs exist in `Input/configs/`, scripts will prompt you to specify one:
@@ -326,6 +482,121 @@ The dispatch module automatically selects the status column based on epoch:
 - Prints a warning when using the fallback
 
 This allows utilities CSVs to use epoch-specific status columns (e.g., `status_2035_EB` vs `status_2035_BB`) or a generic `status` column.
+
+## Thesis-Ready Pipeline
+
+The PoC pipeline is organized into layers that can be run independently or all together:
+
+### Layer-by-Layer Runner
+
+Use `scripts/run_poc_layers.ps1` to run the complete pipeline:
+
+```powershell
+# Run all layers for all epochs
+.\scripts\run_poc_layers.ps1 -Bundle poc_20260105_115401 -RunId dispatch_prop_v2_capfix1 -Layers all
+
+# Run specific layers
+.\scripts\run_poc_layers.ps1 -Bundle poc_20260105_115401 -RunId dispatch_prop_v2_capfix1 -Layers "demandpack,dispatch,compare,rdm"
+
+# Run for specific epochs
+.\scripts\run_poc_layers.ps1 -Bundle poc_20260105_115401 -Epochs "2020,2025,2035_EB,2035_BB" -Layers dispatch
+```
+
+**Available Layers:**
+- `demandpack`: Generate demand profiles for all epochs
+- `dispatch`: Run site dispatch for all epochs (proportional mode with plots)
+- `kpi`: Generate/export KPI table (manual step, script provides info)
+- `compare`: Compare 2035_EB vs 2035_BB pathways
+- `rdm`: Run RDM screening for 2035_EB and 2035_BB (with paired futures)
+- `thesis_pack`: Curate tables and figures into thesis pack folder
+- `all`: Run all layers in sequence
+
+### Expected Outputs
+
+After running the pipeline, the following structure is created:
+
+```
+Output/runs/<bundle>/
+├── epoch<epoch_tag>/
+│   ├── demandpack/demandpack/hourly_heat_demand_<epoch>.csv
+│   └── dispatch/<runid>/
+│       ├── site_dispatch_<epoch_tag>_*.csv (long, long_costed, wide, summary)
+│       ├── signals/incremental_electricity_MW_<epoch_tag>.csv (for 2035 epochs)
+│       ├── signals_used/tariff_nzd_per_MWh_<epoch_tag>.csv
+│       └── figures/heat_<epoch_tag>_unit_stack.png
+├── kpi_table_<runid>.csv
+├── compare_pathways_2035_EB_vs_BB.csv
+├── rdm/
+│   ├── rdm_summary_2035_EB.csv
+│   ├── rdm_summary_2035_BB.csv
+│   └── rdm_compare_2035_EB_vs_BB.csv
+└── thesis_pack/
+    ├── tables/ (curated CSVs)
+    ├── figures/ (curated PNGs)
+    └── pointers.md (mapping to source paths)
+```
+
+**Complete artefact catalogue:** See [docs/THESIS_ARTEFACTS.md](docs/THESIS_ARTEFACTS.md)  
+**Figure listing:** See [docs/THESIS_FIGURES.md](docs/THESIS_FIGURES.md)  
+**Decision model:** See [docs/THESIS_DECISION_MODEL.md](docs/THESIS_DECISION_MODEL.md)
+
+### Release Procedure
+
+**1. Clean bundle (if needed):**
+```powershell
+# Remove existing outputs (optional, for clean run)
+Remove-Item -Recurse -Force "Output\runs\<bundle>"
+```
+
+**2. Run all layers:**
+```powershell
+.\scripts\run_poc_layers.ps1 -Bundle <bundle> -RunId dispatch_prop_v2_capfix1 -Layers all
+```
+
+**3. Run smoke test:**
+```powershell
+.\scripts\smoke_test_release.ps1 -Bundle <bundle> -RunId dispatch_prop_v2_capfix1
+```
+
+**4. Commit and push:**
+```powershell
+git add Output/runs/<bundle>
+git commit -m "Add PoC results for bundle <bundle>"
+git push
+```
+
+**Smoke Test Gates:**
+- All required artefacts exist
+- TOTAL and UNSERVED rows exist in summaries
+- Penalties and unserved are zero (release requirement)
+- 2035_BB has biomass costs and emissions > 0
+- Paired futures validated (EB and BB use identical future_id sets)
+
+### Example: Full Run
+
+```powershell
+# Set variables
+$bundle = "poc_20260105_115401"
+$runId = "dispatch_prop_v2_capfix1"
+
+# Run all layers
+.\scripts\run_poc_layers.ps1 -Bundle $bundle -RunId $runId -Layers all
+
+# Validate release gates
+.\scripts\smoke_test_release.ps1 -Bundle $bundle -RunId $runId
+
+# If smoke test passes, commit
+git add "Output/runs/$bundle"
+git commit -m "Add PoC results for bundle $bundle"
+git push
+```
+
+## Documentation
+
+- **[PoC Pipeline](docs/POC_PIPELINE.md)**: Folder conventions, key artefacts, acceptance checklist
+- **[Thesis Decision Model](docs/THESIS_DECISION_MODEL.md)**: Decision structure, uncertainty factors, evaluation metrics, one-pass coupling
+- **[Thesis Artefacts](docs/THESIS_ARTEFACTS.md)**: Complete list of output files with schemas
+- **[Thesis Figures](docs/THESIS_FIGURES.md)**: Figure listing with generation commands and suggested captions
 
 ## Reproducibility
 

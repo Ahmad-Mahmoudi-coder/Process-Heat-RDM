@@ -674,6 +674,47 @@ def run_single_epoch(epoch: int, batch_run_id: str, args, INPUT_DIR: Path, ROOT:
     # Step 4B: Incremental electricity export is handled by site_dispatch_2020.py
     # It writes to Output/runs/<run_id>/signals/incremental_electricity_MW_<epoch>.csv
     
+    # Step 4C: Run GXP SignalsPack consumer (if GXP signals available)
+    epoch_variant_label = f"{epoch}_{variant}" if variant else str(epoch)
+    # Try variant-tagged filename first, then fallback to epoch-only (for backward compatibility)
+    incremental_path_variant = signals_dir / f'incremental_electricity_MW_{epoch_variant_label}.csv'
+    incremental_path_epoch = signals_dir / f'incremental_electricity_MW_{epoch}.csv'
+    incremental_path = incremental_path_variant if incremental_path_variant.exists() else incremental_path_epoch
+    
+    # Use the actual GXP CSV path from --gxp-csv argument
+    if incremental_path.exists() and gxp_csv_path and gxp_csv_path.exists():
+        print(f"[INFO] Running GXP SignalsPack consumer for {epoch_variant_label}...")
+        gxp_consumer_cmd = [
+            sys.executable, '-m', 'src.gxp_signals_consumer',
+            '--bundle', batch_run_id,
+            '--epoch-tag', epoch_variant_label,
+            '--signals-dir', str(gxp_csv_path.parent),
+            '--output-root', str(OUTPUT_DIR),
+            '--voll', '10000.0'
+        ]
+        
+        # Add emissions if available
+        if grid_emissions_path and grid_emissions_path.exists():
+            gxp_consumer_cmd.extend(['--emissions-csv', str(grid_emissions_path)])
+        
+        gxp_consumer_success = run_command(
+            gxp_consumer_cmd,
+            f"Step 4C: GXP SignalsPack consumer ({epoch_variant_label})",
+            run_dir,
+            cwd=ROOT,
+            allow_failure=True
+        )
+        
+        if gxp_consumer_success:
+            print(f"[OK] GXP SignalsPack consumer completed for {epoch_variant_label}")
+        else:
+            print(f"[WARN] GXP SignalsPack consumer failed for {epoch_variant_label}, continuing...")
+    else:
+        if not incremental_path.exists():
+            print(f"[INFO] Incremental electricity CSV not found (tried: {incremental_path_variant} and {incremental_path_epoch}), skipping GXP consumer")
+        if not (gxp_csv_path and gxp_csv_path.exists()):
+            print(f"[INFO] GXP CSV not found: {gxp_csv_path if gxp_csv_path else 'None'}, skipping GXP consumer")
+    
     # Step 5: Run regional electricity PoC (optional, deprecated - GXP signals used directly)
     # Note: For coupling stage, we use GXP signals directly, so regional PoC is optional
     epoch_variant_label = f"{epoch}_{variant}" if variant else str(epoch)
@@ -704,7 +745,10 @@ def run_single_epoch(epoch: int, batch_run_id: str, args, INPUT_DIR: Path, ROOT:
             print(f"[WARN] Regional electricity PoC failed for epoch {epoch} (run_id={run_id})")
             print("  Continuing...")
     else:
-        print(f"[SKIP] Regional electricity PoC: {gxp_csv_path} not found")
+        if not gxp_csv_path.exists():
+            print(f"[SKIP] Regional electricity PoC: GXP CSV not found: {gxp_csv_path}")
+        if not incremental_path.exists():
+            print(f"[SKIP] Regional electricity PoC: Incremental electricity CSV not found: {incremental_path}")
         # regional_success remains None (skipped)
     
     # Outputs are written directly to run_dir (no copying to latest)

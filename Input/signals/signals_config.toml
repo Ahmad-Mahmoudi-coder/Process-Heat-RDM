@@ -12,6 +12,7 @@ biomass_price_nzd_per_MWh_fuel = 35.0
 biomass_ef_tCO2_per_MWh_fuel   = 0.0059
 elec_price_flat_nzd_per_MWh    = 105.0
 ets_price_nzd_per_tCO2         = 30.0
+unserved_penalty_nzd_per_MWh_heat = 20000.0
 
 [signals.epochs."2024"]
 year_start = 2024
@@ -22,6 +23,7 @@ biomass_price_nzd_per_MWh_fuel = 35.0
 biomass_ef_tCO2_per_MWh_fuel   = 0.0059
 elec_price_flat_nzd_per_MWh    = 145.0
 ets_price_nzd_per_tCO2         = 60.0
+unserved_penalty_nzd_per_MWh_heat = 20000.0
 
 [signals.epochs."2027"]
 year_start = 2027
@@ -32,6 +34,7 @@ biomass_price_nzd_per_MWh_fuel = 38.0
 biomass_ef_tCO2_per_MWh_fuel   = 0.0059
 elec_price_flat_nzd_per_MWh    = 130.0
 ets_price_nzd_per_tCO2         = 70.0
+unserved_penalty_nzd_per_MWh_heat = 20000.0
 
 [signals.epochs."2035"]
 year_start = 2035
@@ -42,6 +45,9 @@ biomass_price_nzd_per_MWh_fuel = 42.0
 biomass_ef_tCO2_per_MWh_fuel   = 0.0059
 elec_price_flat_nzd_per_MWh    = 110.0
 ets_price_nzd_per_tCO2         = 90.0
+unserved_penalty_nzd_per_MWh_heat = 20000.0
+
+
 
 
 

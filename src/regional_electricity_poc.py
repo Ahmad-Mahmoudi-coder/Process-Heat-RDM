@@ -1,753 +1,352 @@
 """
 Regional Electricity PoC Module
 
-Computes effective electricity tariffs from GXP capacity constraints based on
-incremental site demand. Supports two engines:
-- simple: Direct calculation without PyPSA (default)
-- pypsa: PyPSA-based optimization (requires PyPSA installation)
-
-Consumes SignalsPack GXP hourly data directly from Edendale_GXP submodule.
-
-Syntax check: python -m py_compile src/regional_electricity_poc.py
+Minimal, deterministic electricity "regional signalling" PoC that:
+- reads incremental electricity demand (from site dispatch export)
+- applies a simple headroom constraint
+- produces headroom + tariff signals (SignalsPack-like)
+- writes outputs into the same run folder (no external downloads)
 """
 
-# Bootstrap: allow `python .\src\script.py` (adds repo root to sys.path)
-import sys
-from pathlib import Path
+from __future__ import annotations
 
-ROOT = Path(__file__).resolve().parents[1]
+import sys
+from pathlib import Path as PathlibPath
+
+ROOT = PathlibPath(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import argparse
+import json
 import pandas as pd
 import numpy as np
-import argparse
-import tomllib
+from typing import Dict, Optional
 
-# Try to import PyPSA (optional)
+# TOML loading (compatible with Python 3.11+ tomllib or tomli fallback)
 try:
-    import pypsa
-    HAVE_PYPSA = True
+    import tomllib
 except ImportError:
-    HAVE_PYPSA = False
+    try:
+        import tomli as tomllib
+    except ImportError:
+        raise ImportError("Need tomllib (Python 3.11+) or tomli package")
 
+from src.path_utils import repo_root, resolve_path
 from src.time_utils import parse_any_timestamp, to_iso_z
-from src.path_utils import repo_root, input_root, resolve_path
 
 
-def load_gxp_hourly(gxp_csv_path: str, for_simple_engine: bool = False) -> pd.DataFrame:
+def load_gxp_config(config_path: Optional[PathlibPath], epoch_tag: str) -> Dict:
     """
-    Load GXP hourly data from SignalsPack.
-    
-    Expected columns from gxp_hourly_<epoch>.csv:
-    - timestamp_utc: UTC ISO-8601 with Z suffix
-    - capacity_mw: GXP capacity available
-    - baseline_import_mw: Baseline import at GXP
-    - headroom_mw: Available headroom (for simple engine)
-    - reserve_margin_mw: Reserve margin (for simple engine)
-    - tariff_nzd_per_mwh: Base tariff
-    - epoch: Epoch year (for simple engine)
+    Load GXP PoC config from TOML file.
     
     Args:
-        gxp_csv_path: Path to GXP hourly CSV
-        for_simple_engine: If True, expects additional columns (headroom_mw, reserve_margin_mw, epoch)
+        config_path: Path to GXP config TOML (optional)
+        epoch_tag: Epoch tag (e.g., "2035_EB")
+        
+    Returns:
+        Dictionary with keys: gxp_capacity_MW, baseline_import_MW, 
+        tariff_base_nzd_per_MWh, scarcity_adder_nzd_per_MWh
     """
-    df = pd.read_csv(gxp_csv_path)
-    
-    # Parse timestamp_utc to UTC datetime
-    if 'timestamp_utc' not in df.columns:
-        raise ValueError(f"timestamp_utc column missing in {gxp_csv_path}")
-    
-    df['timestamp_utc'] = parse_any_timestamp(df['timestamp_utc'])
-    df = df.sort_values('timestamp_utc').reset_index(drop=True)
-    
-    # Verify required columns exist
-    if for_simple_engine:
-        required_cols = ['capacity_mw', 'baseline_import_mw', 'headroom_mw', 
-                        'reserve_margin_mw', 'tariff_nzd_per_mwh', 'epoch']
-    else:
-        required_cols = ['capacity_mw', 'baseline_import_mw', 'tariff_nzd_per_mwh']
-    
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        raise ValueError(f"Missing required columns in {gxp_csv_path}: {missing_cols}")
-    
-    # Rename to match expected names
-    rename_dict = {
-        'capacity_mw': 'gxp_capacity_MW',
-        'baseline_import_mw': 'baseline_import_MW',
-        'tariff_nzd_per_mwh': 'tariff_base_nzd_per_MWh',
-        'timestamp_utc': 'timestamp'
+    defaults = {
+        'gxp_capacity_MW': 120.0,
+        'baseline_import_MW': 70.0,
+        'tariff_base_nzd_per_MWh': 120.0,
+        'scarcity_adder_nzd_per_MWh': 200.0
     }
     
-    if for_simple_engine:
-        rename_dict.update({
-            'headroom_mw': 'headroom_mw',
-            'reserve_margin_mw': 'reserve_margin_mw',
-            'epoch': 'epoch'
-        })
+    if config_path is None or not config_path.exists():
+        print(f"[WARN] GXP config TOML not found: {config_path}, using defaults")
+        return defaults
     
-    df = df.rename(columns=rename_dict)
-    
-    # Select columns to return
-    if for_simple_engine:
-        return df[['timestamp', 'gxp_capacity_MW', 'baseline_import_MW', 'headroom_mw',
-                   'reserve_margin_mw', 'tariff_base_nzd_per_MWh', 'epoch']]
-    else:
-        return df[['timestamp', 'gxp_capacity_MW', 'baseline_import_MW', 'tariff_base_nzd_per_MWh']]
+    try:
+        with open(config_path, 'rb') as f:
+            config = tomllib.load(f)
+        
+        # Look for epoch-specific section (e.g., [2035_EB] or [2035_BB])
+        epoch_section = config.get(epoch_tag, {})
+        if not epoch_section:
+            # Try base year (e.g., [2035] if epoch_tag is "2035_EB")
+            base_year = epoch_tag.split('_')[0] if '_' in epoch_tag else epoch_tag
+            epoch_section = config.get(base_year, {})
+        
+        # Merge defaults with config values
+        result = defaults.copy()
+        for key in defaults.keys():
+            if key in epoch_section:
+                result[key] = float(epoch_section[key])
+        
+        print(f"[OK] Loaded GXP config for {epoch_tag} from {config_path}")
+        return result
+    except Exception as e:
+        print(f"[WARN] Failed to load GXP config: {e}, using defaults")
+        return defaults
 
 
-def load_incremental_demand(incremental_path: str, gxp_timestamps: pd.Series, 
-                            strict_alignment: bool = False) -> pd.DataFrame:
+def load_incremental_electricity(csv_path: PathlibPath) -> pd.DataFrame:
     """
-    Load hourly incremental electricity demand from site.
+    Load incremental electricity demand CSV.
     
-    If incremental_path is None or file doesn't exist, returns zero series aligned to GXP timestamps.
-    
-    Expected columns: timestamp or timestamp_utc, incremental_demand_MW (or similar)
+    Expected schema: timestamp/timestamp_utc, incremental_electricity_MW
     
     Args:
-        incremental_path: Path to incremental demand CSV (optional)
-        gxp_timestamps: Series of GXP timestamps to align to
-        strict_alignment: If True, require exact timestamp match (for simple engine)
+        csv_path: Path to incremental electricity CSV
+        
+    Returns:
+        DataFrame with columns: timestamp_utc, incremental_electricity_MW
     """
-    if incremental_path is None or not Path(incremental_path).exists():
-        print(f"[WARNING] Incremental demand file not found: {incremental_path}")
-        print(f"  Using zero incremental demand series aligned to GXP timestamps")
-        return pd.DataFrame({
-            'timestamp': gxp_timestamps,
-            'incremental_demand_MW': 0.0
-        })
+    if not csv_path.exists():
+        raise FileNotFoundError(f"Incremental electricity CSV not found: {csv_path}")
     
-    df = pd.read_csv(incremental_path)
+    df = pd.read_csv(csv_path)
     
-    # Support both timestamp and timestamp_utc
-    if 'timestamp_utc' in df.columns:
-        df['timestamp'] = parse_any_timestamp(df['timestamp_utc'])
-    elif 'timestamp' in df.columns:
-        df['timestamp'] = parse_any_timestamp(df['timestamp'])
-    else:
-        raise ValueError(f"Incremental demand CSV {incremental_path} must have either 'timestamp' or 'timestamp_utc' column")
-    
-    df = df.sort_values('timestamp').reset_index(drop=True)
-    
-    # Try common column names
-    demand_col = None
-    for col in df.columns:
-        if 'incremental' in col.lower() and 'mw' in col.lower():
-            demand_col = col
-            break
-        elif 'demand' in col.lower() and 'mw' in col.lower() and 'incremental' not in col.lower():
-            demand_col = col
+    # Normalize timestamp column
+    ts_col = None
+    for col in ['timestamp_utc', 'timestamp']:
+        if col in df.columns:
+            ts_col = col
             break
     
-    if demand_col is None:
-        raise ValueError(f"No incremental demand column found in {incremental_path}. Expected column with 'incremental' and 'MW' in name.")
+    if ts_col is None:
+        raise ValueError(f"Incremental CSV must have 'timestamp' or 'timestamp_utc' column. Found: {df.columns.tolist()}")
     
-    result = df[['timestamp', demand_col]].rename(columns={demand_col: 'incremental_demand_MW'})
+    # Normalize incremental column
+    inc_col = None
+    for col in ['incremental_electricity_MW', 'incremental_MW']:
+        if col in df.columns:
+            inc_col = col
+            break
     
-    if strict_alignment:
-        # For simple engine: require exact timestamp match
-        result = result.set_index('timestamp')
-        gxp_indexed = pd.Series(gxp_timestamps.values, index=gxp_timestamps)
-        result = result.reindex(gxp_indexed.index)
-        
-        if result['incremental_demand_MW'].isna().any():
-            raise ValueError(
-                f"Incremental demand timestamps do not exactly match GXP timestamps. "
-                f"Missing timestamps: {result[result['incremental_demand_MW'].isna()].index.tolist()[:5]}..."
-            )
-        
-        result = result.reset_index()
-        result = result.rename(columns={'index': 'timestamp'})
+    if inc_col is None:
+        raise ValueError(f"Incremental CSV must have 'incremental_electricity_MW' or 'incremental_MW' column. Found: {df.columns.tolist()}")
+    
+    # Parse timestamps
+    df['timestamp_utc'] = parse_any_timestamp(df[ts_col])
+    if df['timestamp_utc'].dt.tz is None:
+        df['timestamp_utc'] = df['timestamp_utc'].dt.tz_localize('UTC')
     else:
-        # For PyPSA engine: allow reindexing with forward fill
-        result = result.set_index('timestamp').reindex(gxp_timestamps, method='ffill').fillna(0.0).reset_index()
+        df['timestamp_utc'] = df['timestamp_utc'].dt.tz_convert('UTC')
+    
+    # Rename incremental column to standard name
+    df['incremental_electricity_MW'] = df[inc_col]
+    
+    # Sort by timestamp
+    df = df.sort_values('timestamp_utc').reset_index(drop=True)
+    
+    # Validate timestamps
+    if not df['timestamp_utc'].is_monotonic_increasing:
+        raise ValueError("Timestamps are not monotonic increasing")
+    
+    if df['timestamp_utc'].duplicated().any():
+        raise ValueError("Duplicate timestamps found")
+    
+    # Validate incremental values
+    if (df['incremental_electricity_MW'] < 0).any():
+        print(f"[WARN] Negative incremental electricity values found, setting to 0")
+        df['incremental_electricity_MW'] = df['incremental_electricity_MW'].clip(lower=0.0)
+    
+    return df[['timestamp_utc', 'incremental_electricity_MW']]
+
+
+def compute_regional_signals(incremental_df: pd.DataFrame, gxp_config: Dict) -> pd.DataFrame:
+    """
+    Compute regional electricity signals (headroom, overload, shed, tariff).
+    
+    Logic:
+    1) headroom_MW = max(0, gxp_capacity_MW - baseline_import_MW) (constant)
+    2) overload_MW = max(0, incremental_MW - headroom_MW)
+    3) shed_MW = overload_MW
+    4) tariff_nzd_per_MWh = tariff_base + scarcity_adder * (overload_MW > 0 ? 1 : 0)
+    
+    Args:
+        incremental_df: DataFrame with timestamp_utc, incremental_electricity_MW
+        gxp_config: Dictionary with GXP configuration
+        
+    Returns:
+        DataFrame with columns: timestamp_utc, headroom_MW, overload_MW, 
+        shed_MW, tariff_nzd_per_MWh
+    """
+    result = incremental_df.copy()
+    
+    # Extract config values
+    gxp_capacity_MW = gxp_config['gxp_capacity_MW']
+    baseline_import_MW = gxp_config['baseline_import_MW']
+    tariff_base = gxp_config['tariff_base_nzd_per_MWh']
+    scarcity_adder = gxp_config['scarcity_adder_nzd_per_MWh']
+    
+    # 1) Compute headroom (constant across hours)
+    headroom_MW = max(0.0, gxp_capacity_MW - baseline_import_MW)
+    result['headroom_MW'] = headroom_MW
+    
+    # 2) Compute overload
+    result['overload_MW'] = np.maximum(0.0, result['incremental_electricity_MW'] - headroom_MW)
+    
+    # 3) Compute shed (equal to overload in PoC)
+    result['shed_MW'] = result['overload_MW']
+    
+    # 4) Compute tariff (binary scarcity adder)
+    result['tariff_nzd_per_MWh'] = tariff_base + scarcity_adder * (result['overload_MW'] > 0).astype(float)
     
     return result
 
 
-# load_tariff is no longer needed - tariff comes from GXP file
-
-
-def load_grid_upgrades(upgrades_config_path: str = None) -> tuple[list[dict], dict]:
+def compute_summary(signals_df: pd.DataFrame, gxp_config: Dict, epoch_tag: str) -> Dict:
     """
-    Load grid upgrade options from TOML config and compute annualised costs using CRF.
-    
-    Expected format in grid_upgrades.toml:
-    [assumptions]
-    real_discount_rate = 0.07
-    asset_life_years = 40
-    consents_uplift_factor = 1.25
-    
-    [[upgrades]]
-    name = "none"
-    capacity_MW = 0
-    capex_nzd = 0.0
-    lead_time_months = 0
-    security_level = "existing"
-    
-    Returns tuple of (upgrade_options list, assumptions dict)
-    """
-    if upgrades_config_path is None:
-        # Default to Input/configs/grid_upgrades_southland_edendale.toml
-        upgrades_config_path = input_root() / 'configs' / 'grid_upgrades_southland_edendale.toml'
-        # Fallback to old location if new one doesn't exist
-        if not upgrades_config_path.exists():
-            upgrades_config_path = input_root() / 'signals' / 'grid_upgrades.toml'
-    else:
-        upgrades_config_path = resolve_path(upgrades_config_path)
-    
-    if not upgrades_config_path.exists():
-        # Return default: no upgrade option
-        return [{'name': 'none', 'capacity_MW': 0, 'capex_nzd': 0.0, 'annualised_cost_nzd': 0.0,
-                 'lead_time_months': 0, 'security_level': 'NA'}], {}
-    
-    with open(upgrades_config_path, 'rb') as f:
-        config = tomllib.load(f)
-    
-    # Load assumptions
-    assumptions = config.get('assumptions', {})
-    real_discount_rate = float(assumptions.get('real_discount_rate', 0.07))
-    asset_life_years = float(assumptions.get('asset_life_years', 40))
-    consents_uplift_factor = float(assumptions.get('consents_uplift_factor', 1.25))
-    
-    # Compute CRF (Capital Recovery Factor)
-    # CRF = r*(1+r)^n / ((1+r)^n - 1)
-    r = real_discount_rate
-    n = asset_life_years
-    if r > 0 and n > 0:
-        crf = (r * (1 + r)**n) / ((1 + r)**n - 1)
-    else:
-        crf = 1.0 / n if n > 0 else 0.0
-    
-    assumptions['CRF'] = crf
-    
-    upgrades = config.get('upgrades', [])
-    if not upgrades:
-        return [{'name': 'none', 'capacity_MW': 0, 'capex_nzd': 0.0, 'annualised_cost_nzd': 0.0,
-                 'lead_time_months': 0, 'security_level': 'NA'}], assumptions
-    
-    # Validate and compute annualised costs
-    validated = []
-    for upgrade in upgrades:
-        # Required fields
-        if 'capacity_MW' not in upgrade:
-            print(f"[WARN] Skipping invalid upgrade option (missing capacity_MW): {upgrade.get('name', 'unknown')}")
-            continue
-        
-        capacity_MW = float(upgrade['capacity_MW'])
-        
-        # Handle both old format (annual_cost_nzd) and new format (capex_nzd)
-        if 'capex_nzd' in upgrade:
-            capex_nzd = float(upgrade['capex_nzd'])
-            # Compute annualised cost: capex * CRF * consents_uplift_factor
-            annualised_cost_nzd = capex_nzd * crf * consents_uplift_factor
-        elif 'annual_cost_nzd' in upgrade:
-            # Old format: use annual_cost_nzd directly
-            annualised_cost_nzd = float(upgrade['annual_cost_nzd'])
-            capex_nzd = annualised_cost_nzd / (crf * consents_uplift_factor) if crf > 0 else 0.0
-        else:
-            print(f"[WARN] Skipping invalid upgrade option (missing capex_nzd or annual_cost_nzd): {upgrade.get('name', 'unknown')}")
-            continue
-        
-        validated.append({
-            'name': str(upgrade.get('name', f'upgrade_{capacity_MW}MW')),
-            'capacity_MW': capacity_MW,
-            'capex_nzd': capex_nzd,
-            'annualised_cost_nzd': annualised_cost_nzd,
-            'lead_time_months': int(upgrade.get('lead_time_months', 0)),
-            'security_level': str(upgrade.get('security_level', 'NA'))
-        })
-    
-    # Sort by capacity (ascending)
-    validated.sort(key=lambda x: x['capacity_MW'])
-    
-    # Ensure zero option exists
-    if validated[0]['capacity_MW'] != 0:
-        validated.insert(0, {'name': 'none', 'capacity_MW': 0, 'capex_nzd': 0.0, 'annualised_cost_nzd': 0.0,
-                             'lead_time_months': 0, 'security_level': 'NA'})
-    
-    return validated, assumptions
-
-
-def select_annual_upgrade(headroom_base: pd.Series, incremental_MW: pd.Series, 
-                          upgrade_options: list[dict], voll_nzd_per_MWh: float = 10000.0,
-                          dt_h: float = 1.0) -> dict:
-    """
-    Select optimal grid upgrade for entire year based on annualised cost + shed cost.
-    
-    PoC assumption: upgrades available instantly upon selection; lead_time_months retained 
-    for reporting/planning extensions (ignored in decision feasibility).
-    
-    For each upgrade option k:
-    - headroom_eff_t = headroom_base_t + capacity_MW_k
-    - shed_MW_t = max(0, incremental_MW_t - headroom_eff_t)
-    - annual_shed_MWh = sum(shed_MW_t * dt_h)
-    - total_cost = annualised_cost_nzd + (annual_shed_MWh * VOLL_nzd_per_MWh)
-    
-    Selects option with minimum total cost.
+    Compute annual summary statistics.
     
     Args:
-        headroom_base: Series of baseline headroom (MW) per timestep
-        incremental_MW: Series of incremental electricity demand (MW) per timestep
-        upgrade_options: List of upgrade option dicts (from load_grid_upgrades)
-        voll_nzd_per_MWh: Value of lost load (NZD per MWh)
-        dt_h: Timestep duration in hours (default 1.0)
-    
+        signals_df: DataFrame with computed signals
+        gxp_config: Dictionary with GXP configuration
+        epoch_tag: Epoch tag
+        
     Returns:
-        dict with keys: name, capacity_MW, capex_nzd, annualised_cost_nzd, 
-                       annual_shed_MWh, total_cost_nzd, lead_time_months, security_level
+        Dictionary with summary metrics
     """
-    # Validate inputs
-    if len(headroom_base) != len(incremental_MW):
-        raise ValueError(f"headroom_base and incremental_MW must have same length: {len(headroom_base)} vs {len(incremental_MW)}")
+    # Estimate dt_h from timestamps
+    if len(signals_df) > 1:
+        dt_h = (signals_df['timestamp_utc'].iloc[1] - signals_df['timestamp_utc'].iloc[0]).total_seconds() / 3600.0
+    else:
+        dt_h = 1.0
     
-    if len(headroom_base) == 0:
-        raise ValueError("Empty time series provided")
+    # Compute annual totals
+    annual_incremental_MWh = (signals_df['incremental_electricity_MW'] * dt_h).sum()
+    annual_shed_MWh = (signals_df['shed_MW'] * dt_h).sum()
+    max_overload_MW = signals_df['overload_MW'].max()
     
-    best_option = None
-    best_total_cost = float('inf')
-    
-    # Evaluate each upgrade option
-    for upgrade in upgrade_options:
-        capacity_MW = float(upgrade['capacity_MW'])
-        annualised_cost_nzd = float(upgrade.get('annualised_cost_nzd', upgrade.get('annual_cost_nzd', 0.0)))
-        
-        # Effective headroom with this upgrade
-        headroom_eff = headroom_base + capacity_MW
-        
-        # Compute shed per timestep: max(0, incremental_MW - headroom_eff)
-        shed_MW = (incremental_MW - headroom_eff).clip(lower=0.0)
-        
-        # Annual shed energy (MWh)
-        annual_shed_MWh = (shed_MW * dt_h).sum()
-        
-        # Total cost: annualised upgrade cost + shed cost
-        shed_cost_nzd = annual_shed_MWh * voll_nzd_per_MWh
-        total_cost_nzd = annualised_cost_nzd + shed_cost_nzd
-        
-        # Track best option
-        if total_cost_nzd < best_total_cost:
-            best_total_cost = total_cost_nzd
-            best_option = {
-                'name': upgrade.get('name', 'unknown'),
-                'capacity_MW': capacity_MW,
-                'capex_nzd': upgrade.get('capex_nzd', 0.0),
-                'annualised_cost_nzd': annualised_cost_nzd,
-                'annual_shed_MWh': float(annual_shed_MWh),
-                'total_cost_nzd': float(total_cost_nzd),
-                'lead_time_months': upgrade.get('lead_time_months', 0),
-                'security_level': upgrade.get('security_level', 'NA')
-            }
-    
-    if best_option is None:
-        raise ValueError("No valid upgrade option found")
-    
-    return best_option
-
-
-def choose_optimal_upgrade(incremental_demand_MW: float, headroom_MW: float,
-                           upgrade_options: list[dict], voll: float = 10000.0) -> dict:
-    """
-    Choose the cheapest upgrade option that minimizes total cost (upgrade + shed*VOLL).
-    
-    Args:
-        incremental_demand_MW: Incremental demand for this hour
-        headroom_MW: Available headroom before upgrade
-        upgrade_options: List of upgrade options (from load_grid_upgrades)
-        voll: Value of lost load (NZD per MWh)
-    
-    Returns:
-        dict with keys: upgrade_selected_MW, upgrade_annual_cost_nzd, headroom_effective_MW,
-                        shed_MW, total_cost_nzd
-    """
-    if incremental_demand_MW <= headroom_MW:
-        # No shed needed, no upgrade needed
-        return {
-            'upgrade_selected_MW': 0.0,
-            'upgrade_annual_cost_nzd': 0.0,
-            'headroom_effective_MW': headroom_MW,
-            'shed_MW': 0.0,
-            'total_cost_nzd': 0.0
-        }
-    
-    # Calculate shed without upgrade
-    shed_no_upgrade = incremental_demand_MW - headroom_MW
-    cost_no_upgrade = shed_no_upgrade * voll  # Per-hour cost (VOLL is per MWh)
-    
-    best_option = {
-        'upgrade_selected_MW': 0.0,
-        'upgrade_annual_cost_nzd': 0.0,
-        'headroom_effective_MW': headroom_MW,
-        'shed_MW': shed_no_upgrade,
-        'total_cost_nzd': cost_no_upgrade
+    summary = {
+        'epoch_tag': epoch_tag,
+        'gxp_capacity_MW': float(gxp_config['gxp_capacity_MW']),
+        'baseline_import_MW': float(gxp_config['baseline_import_MW']),
+        'annual_incremental_MWh': float(annual_incremental_MWh),
+        'annual_shed_MWh': float(annual_shed_MWh),
+        'max_overload_MW': float(max_overload_MW),
+        'notes': 'PoC deterministic regional signalling (no external data)'
     }
     
-    # Evaluate each upgrade option
-    for upgrade in upgrade_options:
-        upgrade_capacity = upgrade['capacity_MW']
-        upgrade_annual_cost = upgrade['annual_cost_nzd']
-        
-        # Effective headroom with this upgrade
-        headroom_effective = headroom_MW + upgrade_capacity
-        
-        # Shed with this upgrade
-        shed = max(0.0, incremental_demand_MW - headroom_effective)
-        
-        # Total cost: upgrade (prorated to hourly) + shed*VOLL
-        # Prorate annual cost to hourly (assume 8760 hours per year)
-        upgrade_hourly_cost = upgrade_annual_cost / 8760.0
-        shed_cost = shed * voll
-        total_cost = upgrade_hourly_cost + shed_cost
-        
-        # Choose option with lowest total cost
-        if total_cost < best_option['total_cost_nzd']:
-            best_option = {
-                'upgrade_selected_MW': upgrade_capacity,
-                'upgrade_annual_cost_nzd': upgrade_annual_cost,
-                'headroom_effective_MW': headroom_effective,
-                'shed_MW': shed,
-                'total_cost_nzd': total_cost
-            }
-    
-    return best_option
+    return summary
 
 
-def run_simple_engine(gxp_csv_path: str, incremental_path: str = None,
-                     output_path: str = None, epoch: str = '2020',
-                     upgrades_config_path: str = None, voll: float = 10000.0) -> pd.DataFrame:
+def write_outputs(signals_df: pd.DataFrame, summary: Dict, output_dir: PathlibPath, epoch_tag: str) -> None:
     """
-    Run simple engine: direct calculation without PyPSA.
+    Write outputs to electricity_poc directory.
+    
+    Outputs:
+    - signals/headroom_MW_<epoch_tag>.csv
+    - signals/tariff_nzd_per_MWh_<epoch_tag>.csv
+    - summary_<epoch_tag>.json
     
     Args:
-        gxp_csv_path: Path to GXP hourly CSV from SignalsPack
-        incremental_path: Optional path to incremental demand CSV
-        output_path: Path to output CSV
-        epoch: Epoch label
-    
-    Returns DataFrame with results.
+        signals_df: DataFrame with computed signals
+        summary: Summary dictionary
+        output_dir: Base output directory (e.g., Output/runs/<bundle>/epoch<epoch_tag>)
+        epoch_tag: Epoch tag
     """
-    print("Loading GXP hourly data from SignalsPack...")
-    gxp_df = load_gxp_hourly(gxp_csv_path, for_simple_engine=True)
+    # Create electricity_poc directory structure
+    poc_dir = output_dir / 'electricity_poc'
+    signals_dir = poc_dir / 'signals'
+    signals_dir.mkdir(parents=True, exist_ok=True)
     
-    print("Loading incremental demand...")
-    incremental_df = load_incremental_demand(incremental_path, gxp_df['timestamp'], strict_alignment=True)
+    # Write headroom CSV
+    headroom_df = signals_df[['timestamp_utc', 'headroom_MW']].copy()
+    headroom_df['timestamp_utc'] = to_iso_z(headroom_df['timestamp_utc'])
+    headroom_path = signals_dir / f'headroom_MW_{epoch_tag}.csv'
+    headroom_df.to_csv(headroom_path, index=False)
+    print(f"[OK] Wrote headroom signals to {headroom_path}")
     
-    # Merge GXP data with incremental demand
-    df = gxp_df.merge(incremental_df, on='timestamp', how='inner')
+    # Write tariff CSV
+    tariff_df = signals_df[['timestamp_utc', 'tariff_nzd_per_MWh']].copy()
+    tariff_df['timestamp_utc'] = to_iso_z(tariff_df['timestamp_utc'])
+    tariff_path = signals_dir / f'tariff_nzd_per_MWh_{epoch_tag}.csv'
+    tariff_df.to_csv(tariff_path, index=False)
+    print(f"[OK] Wrote tariff signals to {tariff_path}")
     
-    if len(df) == 0:
-        raise ValueError("No matching timestamps found after merging GXP and incremental data")
-    
-    print(f"Processing {len(df)} hours with simple engine...")
-    
-    # Load grid upgrade options if available
-    upgrade_options = load_grid_upgrades(upgrades_config_path)
-    if len(upgrade_options) > 1:
-        print(f"[INFO] Loaded {len(upgrade_options)} grid upgrade options")
-    else:
-        print(f"[INFO] No grid upgrade options configured (using default: no upgrade)")
-    
-    # Simple dispatch logic with upgrade selection
-    upgrade_results = []
-    for idx, row in df.iterrows():
-        result = choose_optimal_upgrade(
-            incremental_demand_MW=row['incremental_demand_MW'],
-            headroom_MW=row['headroom_mw'],
-            upgrade_options=upgrade_options,
-            voll=voll
-        )
-        upgrade_results.append(result)
-    
-    upgrade_df = pd.DataFrame(upgrade_results)
-    
-    # Use effective headroom (after upgrade) for dispatch
-    df['headroom_effective_mw'] = upgrade_df['headroom_effective_MW']
-    df['inc_served_mw'] = df[['incremental_demand_MW', 'headroom_effective_mw']].min(axis=1)
-    df['shed_mw'] = upgrade_df['shed_MW']
-    df['grid_import_mw'] = df['baseline_import_MW'] + df['inc_served_mw']
-    df['headroom_remaining_mw'] = df['headroom_effective_mw'] - df['inc_served_mw']
-    df['upgrade_selected_MW'] = upgrade_df['upgrade_selected_MW']
-    df['upgrade_annual_cost_nzd'] = upgrade_df['upgrade_annual_cost_nzd']
-    df['tariff_effective_nzd_per_mwh'] = df['tariff_base_nzd_per_MWh']  # Simple: no VOLL pricing
-    
-    # Build output DataFrame
-    output_df = pd.DataFrame({
-        'timestamp_utc': to_iso_z(df['timestamp']),
-        'epoch': df['epoch'],
-        'baseline_import_mw': df['baseline_import_MW'],
-        'incremental_demand_mw': df['incremental_demand_MW'],
-        'grid_import_mw': df['grid_import_mw'],
-        'shed_mw': df['shed_mw'],
-        'headroom_mw': df['headroom_mw'],  # Original headroom (before upgrade)
-        'headroom_effective_MW': df['headroom_effective_mw'],  # After upgrade
-        'headroom_remaining_mw': df['headroom_remaining_mw'],
-        'upgrade_selected_MW': df['upgrade_selected_MW'],
-        'upgrade_annual_cost_nzd': df['upgrade_annual_cost_nzd'],
-        'tariff_nzd_per_mwh': df['tariff_base_nzd_per_MWh'],
-        'tariff_effective_nzd_per_mwh': df['tariff_effective_nzd_per_mwh'],
-        'capacity_mw': df['gxp_capacity_MW'],
-        'reserve_margin_mw': df['reserve_margin_mw']
-    })
-    
-    # Save output
-    if output_path:
-        output_path_obj = Path(output_path)
-        output_path_obj.parent.mkdir(parents=True, exist_ok=True)
-        output_df.to_csv(output_path, index=False)
-    
-    # Summary statistics
-    total_shed_mwh = output_df['shed_mw'].sum()
-    max_shed_mw = output_df['shed_mw'].max()
-    min_headroom_mw = output_df['headroom_mw'].min()
-    min_headroom_effective_mw = output_df['headroom_effective_MW'].min()
-    total_upgrade_cost_nzd = output_df['upgrade_annual_cost_nzd'].sum() / 8760.0 * len(output_df)  # Prorate to actual hours
-    hours_with_upgrade = (output_df['upgrade_selected_MW'] > 0).sum()
-    
-    print(f"[OK] Simple engine completed")
-    print(f"  Total hours: {len(output_df)}")
-    print(f"  Total shed: {total_shed_mwh:.2f} MWh")
-    print(f"  Max shed: {max_shed_mw:.2f} MW")
-    print(f"  Min headroom (original): {min_headroom_mw:.2f} MW")
-    print(f"  Min headroom (effective, after upgrade): {min_headroom_effective_mw:.2f} MW")
-    if hours_with_upgrade > 0:
-        print(f"  Hours with upgrade selected: {hours_with_upgrade} ({100.0 * hours_with_upgrade / len(output_df):.1f}%)")
-        print(f"  Total upgrade cost (prorated): {total_upgrade_cost_nzd:.2f} NZD")
-    if output_path:
-        print(f"  Saved results to {output_path}")
-    
-    return output_df
-
-
-def solve_hourly_opf(baseline_MW: float, incremental_MW: float, capacity_MW: float,
-                     tariff_base: float, voll: float = 10000.0) -> dict:
-    """
-    Solve single-hour OPF for GXP import with capacity constraint.
-    
-    Args:
-        baseline_MW: Baseline import (must be served)
-        incremental_MW: Incremental demand from site
-        capacity_MW: Maximum GXP capacity
-        tariff_base: Base tariff (NZD per MWh)
-        voll: Value of lost load (NZD per MWh) for shedding generator
-        
-    Returns:
-        dict with: grid_import_MW, shed_MW, headroom_MW, tariff_effective
-    """
-    total_demand = baseline_MW + incremental_MW
-    
-    # Create minimal PyPSA network (only called if HAVE_PYPSA is True)
-    if not HAVE_PYPSA:
-        raise ImportError("PyPSA is required for PyPSA engine. Install with: pip install pypsa")
-    
-    n = pypsa.Network()
-    
-    # Add bus
-    n.add("Bus", "bus0")
-    
-    # Add load
-    n.add("Load", "load0", bus="bus0", p_set=total_demand)
-    
-    # Add import generator (capacity limited)
-    max_import = max(0.0, capacity_MW - baseline_MW)  # Available capacity for incremental
-    n.add("Generator", "import", bus="bus0", 
-          p_min_pu=0.0, p_max_pu=1.0,
-          p_nom=max(0.1, max_import),  # At least 0.1 MW to avoid zero capacity
-          marginal_cost=tariff_base)
-    
-    # Add shedding generator (high cost, unlimited capacity)
-    n.add("Generator", "shed", bus="bus0",
-          p_min_pu=0.0, p_max_pu=1.0,
-          p_nom=total_demand,  # Enough to meet all demand
-          marginal_cost=voll)
-    
-    # Solve linear OPF
-    try:
-        n.lopf(pyomo=False, solver_name='glpk')
-        
-        # Extract results
-        grid_import = n.generators_t.p['import'].iloc[0] if len(n.generators_t.p) > 0 else 0.0
-        shed = n.generators_t.p['shed'].iloc[0] if len(n.generators_t.p) > 0 else 0.0
-        
-        # Ensure grid_import doesn't exceed capacity
-        grid_import = min(grid_import, max_import)
-        
-        # If shedding occurred, effective tariff = VOLL, else = base tariff
-        tariff_effective = voll if shed > 1e-6 else tariff_base
-        
-        # Headroom = capacity - total import
-        total_import = baseline_MW + grid_import
-        headroom = max(0.0, capacity_MW - total_import)
-        
-    except Exception as e:
-        # Fallback: if solver fails, use simple logic
-        print(f"Warning: OPF solver failed: {e}. Using simple dispatch logic.")
-        if total_demand <= capacity_MW:
-            grid_import = incremental_MW
-            shed = 0.0
-            tariff_effective = tariff_base
-        else:
-            grid_import = max(0.0, capacity_MW - baseline_MW)
-            shed = total_demand - capacity_MW
-            tariff_effective = voll
-        
-        total_import = baseline_MW + grid_import
-        headroom = max(0.0, capacity_MW - total_import)
-    
-    return {
-        'grid_import_MW': grid_import,
-        'shed_MW': shed,
-        'headroom_MW': headroom,
-        'tariff_effective_nzd_per_MWh': tariff_effective
-    }
-
-
-def run_regional_poc_pypsa(gxp_csv_path: str, incremental_path: str = None,
-                           output_path: str = None, voll: float = 10000.0) -> pd.DataFrame:
-    """
-    Run regional electricity PoC using PyPSA engine.
-    
-    Args:
-        gxp_csv_path: Path to GXP hourly CSV from SignalsPack
-        incremental_path: Optional path to incremental demand CSV (defaults to zero series)
-        output_path: Path to output CSV
-        voll: Value of lost load (NZD per MWh)
-    
-    Returns DataFrame with results.
-    """
-    if not HAVE_PYPSA:
-        raise ImportError("PyPSA is required for PyPSA engine. Install with: pip install pypsa")
-    
-    print("Loading GXP hourly data from SignalsPack...")
-    gxp_df = load_gxp_hourly(gxp_csv_path, for_simple_engine=False)
-    
-    print("Loading incremental demand...")
-    incremental_df = load_incremental_demand(incremental_path, gxp_df['timestamp'], strict_alignment=False)
-    
-    # Merge GXP data with incremental demand
-    df = gxp_df.merge(incremental_df, on='timestamp', how='inner')
-    
-    if len(df) == 0:
-        raise ValueError("No matching timestamps found after merging GXP and incremental data")
-    
-    print(f"Processing {len(df)} hours with PyPSA engine...")
-    
-    # Solve OPF for each hour
-    results = []
-    for idx, row in df.iterrows():
-        result = solve_hourly_opf(
-            baseline_MW=row['baseline_import_MW'],
-            incremental_MW=row['incremental_demand_MW'],
-            capacity_MW=row['gxp_capacity_MW'],
-            tariff_base=row['tariff_base_nzd_per_MWh'],
-            voll=voll
-        )
-        results.append(result)
-    
-    # Combine results
-    results_df = pd.DataFrame(results)
-    output_df = pd.concat([df[['timestamp', 'gxp_capacity_MW', 'baseline_import_MW', 
-                               'incremental_demand_MW', 'tariff_base_nzd_per_MWh']], 
-                           results_df], axis=1)
-    
-    # Rename for clarity
-    output_df = output_df.rename(columns={
-        'incremental_demand_MW': 'incremental_import_MW'
-    })
-    
-    # Convert timestamp to ISO Z format for output
-    output_df['timestamp_utc'] = to_iso_z(output_df['timestamp'])
-    output_df = output_df.drop(columns=['timestamp'])
-    
-    # Reorder columns with timestamp_utc first
-    output_df = output_df[[
-        'timestamp_utc',
-        'gxp_capacity_MW',
-        'baseline_import_MW',
-        'incremental_import_MW',
-        'grid_import_MW',
-        'shed_MW',
-        'headroom_MW',
-        'tariff_base_nzd_per_MWh',
-        'tariff_effective_nzd_per_MWh'
-    ]]
-    
-    # Save output
-    if output_path:
-        output_path_obj = Path(output_path)
-        output_path_obj.parent.mkdir(parents=True, exist_ok=True)
-        output_df.to_csv(output_path, index=False)
-    
-    # Summary statistics
-    total_shed_mwh = output_df['shed_MW'].sum()
-    max_shed_mw = output_df['shed_MW'].max()
-    min_headroom_mw = output_df['headroom_MW'].min()
-    
-    print(f"[OK] PyPSA engine completed")
-    print(f"  Total hours: {len(output_df)}")
-    print(f"  Total shed: {total_shed_mwh:.2f} MWh")
-    print(f"  Max shed: {max_shed_mw:.2f} MW")
-    print(f"  Min headroom: {min_headroom_mw:.2f} MW")
-    if output_path:
-        print(f"  Saved results to {output_path}")
-    
-    return output_df
+    # Write summary JSON
+    summary_path = poc_dir / f'summary_{epoch_tag}.json'
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+    print(f"[OK] Wrote summary to {summary_path}")
 
 
 def main():
-    """CLI entrypoint."""
+    """CLI entrypoint for regional electricity PoC."""
     parser = argparse.ArgumentParser(
-        description='Regional Electricity PoC: Compute effective tariffs from GXP capacity constraints'
+        description='Regional Electricity PoC: Generate headroom and tariff signals from incremental electricity demand'
     )
-    parser.add_argument('--epoch', type=str, default='2020',
-                       help='Epoch label (default: 2020)')
-    parser.add_argument('--gxp-csv', type=str, required=True,
-                       help='Path to GXP hourly CSV from SignalsPack (e.g., modules/edendale_gxp/outputs_latest/gxp_hourly_2020.csv)')
-    parser.add_argument('--incremental-csv', type=str, default=None,
-                       dest='incremental',  # Keep internal name for backward compatibility
-                       help='Optional path to incremental demand CSV (defaults to zero series if not provided)')
-    parser.add_argument('--out', type=str,
-                       default='Output/regional_electricity_signals_2020.csv',
-                       help='Path to output SignalsPack CSV')
-    parser.add_argument('--engine', type=str, choices=['simple', 'pypsa'], default='simple',
-                       help='Engine to use: simple (default, no PyPSA) or pypsa (requires PyPSA)')
-    parser.add_argument('--voll', type=float, default=10000.0,
-                       help='Value of lost load (NZD per MWh) for shedding and upgrade decisions (default: 10000.0)')
-    parser.add_argument('--upgrades-config', type=str, default=None,
-                       help='Path to grid_upgrades.toml config (default: Input/signals/grid_upgrades.toml)')
+    parser.add_argument('--epoch-tag', type=str, required=True,
+                       help='Epoch tag (e.g., 2035_EB, 2035_BB)')
+    parser.add_argument('--incremental-csv', type=str, required=True,
+                       help='Path to incremental_electricity_MW_<epoch_tag>.csv')
+    parser.add_argument('--gxp-config-toml', type=str, default=None,
+                       help='Path to GXP PoC config TOML (optional, defaults used if missing)')
+    parser.add_argument('--output-root', type=str, default='Output',
+                       help='Output root directory (default: Output)')
+    parser.add_argument('--run-id', type=str, default=None,
+                       help='Run ID for output path resolution (e.g., <bundle>/epoch<epoch_tag>)')
     
     args = parser.parse_args()
     
-    # Check if PyPSA is required but not available
-    if args.engine == 'pypsa' and not HAVE_PYPSA:
-        print("[ERROR] PyPSA engine requested but PyPSA is not installed.", file=sys.stderr)
-        print("  Install PyPSA with: pip install pypsa", file=sys.stderr)
-        print("  Or use --engine simple (default) which does not require PyPSA", file=sys.stderr)
-        sys.exit(1)
+    # Resolve paths
+    ROOT = repo_root()
+    incremental_path = PathlibPath(resolve_path(args.incremental_csv))
     
-    try:
-        if args.engine == 'simple':
-            run_simple_engine(
-                gxp_csv_path=args.gxp_csv,
-                incremental_path=args.incremental,
-                output_path=args.out,
-                epoch=args.epoch,
-                upgrades_config_path=args.upgrades_config,
-                voll=args.voll
-            )
-        else:  # pypsa
-            run_regional_poc_pypsa(
-                gxp_csv_path=args.gxp_csv,
-                incremental_path=args.incremental,
-                output_path=args.out,
-                voll=args.voll
-            )
-    except Exception as e:
-        print(f"[ERROR] {e}", file=sys.stderr)
-        sys.exit(1)
+    # Load GXP config
+    gxp_config_path = None
+    if args.gxp_config_toml:
+        gxp_config_path = PathlibPath(resolve_path(args.gxp_config_toml))
+    else:
+        # Try default location
+        default_config = ROOT / 'Input' / 'gxp' / 'poc_gxp_config.toml'
+        if default_config.exists():
+            gxp_config_path = default_config
+    
+    gxp_config = load_gxp_config(gxp_config_path, args.epoch_tag)
+    
+    # Load incremental electricity
+    print(f"Loading incremental electricity from {incremental_path}...")
+    incremental_df = load_incremental_electricity(incremental_path)
+    print(f"[OK] Loaded {len(incremental_df)} timesteps")
+    
+    # Compute regional signals
+    print("Computing regional electricity signals...")
+    signals_df = compute_regional_signals(incremental_df, gxp_config)
+    
+    # Compute summary
+    summary = compute_summary(signals_df, gxp_config, args.epoch_tag)
+    
+    # Resolve output directory
+    output_root = PathlibPath(resolve_path(args.output_root))
+    if args.run_id:
+        # Parse run_id to extract bundle and epoch structure
+        # Format: <bundle>/epoch<epoch_tag> or just <bundle>
+        run_id_parts = args.run_id.split('/')
+        if len(run_id_parts) >= 2 and run_id_parts[1].startswith('epoch'):
+            # Format: <bundle>/epoch<epoch_tag>
+            output_dir = output_root / 'runs' / run_id_parts[0] / run_id_parts[1]
+        else:
+            # Format: <bundle> or <bundle>/...
+            output_dir = output_root / 'runs' / args.run_id
+    else:
+        # Fallback: create epoch-specific directory
+        output_dir = output_root / 'runs' / f'epoch{args.epoch_tag}'
+    
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Write outputs
+    print(f"Writing outputs to {output_dir}...")
+    write_outputs(signals_df, summary, output_dir, args.epoch_tag)
+    
+    # Print summary
+    print("\n" + "="*80)
+    print("Regional Electricity PoC Summary")
+    print("="*80)
+    print(f"Epoch tag: {summary['epoch_tag']}")
+    print(f"GXP capacity: {summary['gxp_capacity_MW']:.1f} MW")
+    print(f"Baseline import: {summary['baseline_import_MW']:.1f} MW")
+    print(f"Annual incremental: {summary['annual_incremental_MWh']:.2f} MWh")
+    print(f"Annual shed: {summary['annual_shed_MWh']:.2f} MWh")
+    print(f"Max overload: {summary['max_overload_MW']:.2f} MW")
+    print("="*80)
 
 
 if __name__ == '__main__':
     main()
-

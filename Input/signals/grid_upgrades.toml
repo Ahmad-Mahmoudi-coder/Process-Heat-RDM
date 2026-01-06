@@ -1,38 +1,49 @@
-# Grid Upgrade Options Configuration
-#
-# Defines discrete grid capacity upgrade options for the regional electricity module.
-# The module will choose the cheapest option that minimizes total cost:
-#   total_cost = upgrade_cost + shed_energy_MWh * VOLL
-#
-# Each upgrade option specifies:
-#   - capacity_MW: Additional headroom capacity (MW)
-#   - annual_cost_nzd: Annualized cost of the upgrade (NZD per year)
-#
-# The module prorates annual costs to hourly costs (divides by 8760 hours/year)
-# and compares against shedding costs (shed_MWh * VOLL).
+# configs/grid_upgrades_southland_edendale.toml
+# Screening-level upgrade menu for Edendale (RETA / Ergo indicative capex).
+# Lead times exclude consenting/easements; apply uplift factor to reflect this.
+
+[assumptions]
+real_discount_rate = 0.07
+asset_life_years   = 40
+consents_uplift_factor = 1.25  # consenting/easements excluded in RETA timing + many costs (screening-level)
 
 [[upgrades]]
+name = "none"
 capacity_MW = 0
-annual_cost_nzd = 0.0
-# Default: no upgrade (baseline)
+capex_nzd = 0.0
+lead_time_months = 0
+security_level = "existing"
 
+# RETA Phase One: Fonterra Edendale Option 1 (N, +21 MW, $9.60m)
 [[upgrades]]
-capacity_MW = 10
-annual_cost_nzd = 50000.0
-# Example: 10 MW upgrade at $50k/year
+name = "fonterra_opt1_N_plus21MW"
+capacity_MW = 21
+capex_nzd = 9_600_000.0
+lead_time_months = 42
+security_level = "N"
 
+# RETA Phase One: Option 2 (N-1, +32 MW, $34.10m)
 [[upgrades]]
-capacity_MW = 20
-annual_cost_nzd = 90000.0
-# Example: 20 MW upgrade at $90k/year
+name = "fonterra_opt2_N-1_plus32MW"
+capacity_MW = 32
+capex_nzd = 34_100_000.0
+lead_time_months = 42
+security_level = "N-1"
 
+# RETA Phase One: Option 3 (N, +97 MW, $55.90m)
 [[upgrades]]
-capacity_MW = 30
-annual_cost_nzd = 120000.0
-# Example: 30 MW upgrade at $120k/year
+name = "fonterra_opt3_N_plus97MW"
+capacity_MW = 97
+capex_nzd = 55_900_000.0
+lead_time_months = 48
+security_level = "N"
 
-# Add more upgrade options as needed.
-# Options are automatically sorted by capacity_MW (ascending).
-# The module selects the option that minimizes total cost (upgrade + shed*VOLL).
-
-
+# PoC-only extension beyond RETA screened menu.
+# Sized to exceed observed required upgrade max (~116.7 MW) for 2035_EB incremental demand.
+# Capex is a screening extrapolation from RETA Option 3 ($55.9m / 97 MW ≈ $0.576m per MW).
+# Not an official estimate.
+name = "fonterra_opt4_N_plus120MW"
+capacity_MW = 125
+capex_nzd = 72_000_000.0
+lead_time_months = 60
+security_level = "N"

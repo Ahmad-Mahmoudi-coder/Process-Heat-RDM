@@ -12,9 +12,6 @@ n_futures = 200           # increase later if needed (e.g., 500–2000)
 seed = 42
 dt_h = 1.0                # must match your time series (8760*1h)
 
-# If your orchestrator supports it, you can choose whether each strategy is
-# an explicit forced choice, or "auto-select" (the module minimises cost).
-# For PoC DMDU, I recommend FORCE to compute regret curves cleanly.
 [strategy_settings]
 default_mode = "force"    # force | auto_select
 allow_auto_select = true  # keep true; can include an "AUTO" strategy below

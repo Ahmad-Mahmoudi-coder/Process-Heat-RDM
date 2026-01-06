@@ -650,6 +650,15 @@ def main():
     df.to_csv(output_csv, index=False)
     print(f"[OK] Saved output to {output_csv}")
     
+    # Generate figures
+    figures_dir = output_paths['run_demandpack_dir'] / 'figures'
+    from src.plot_demandpack import generate_demandpack_figures
+    try:
+        generate_demandpack_figures(output_csv, figures_dir, epoch)
+    except Exception as e:
+        print(f"[WARN] Figure generation failed: {e}")
+        print("[WARN] Continuing without figures...")
+    
     # Create run manifest
     config = load_config(str(config_path_resolved))
     # Try to find factor files from config for manifest

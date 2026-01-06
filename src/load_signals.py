@@ -188,6 +188,16 @@ def get_signals_for_epoch(config: Dict[str, Any], epoch_label: str) -> Dict[str,
             raise ValueError(f"Epoch '{epoch_label}', key '{key}': expected numeric value, got {type(value)}")
         result[key] = float(value)
     
+    # Add optional unserved_penalty_nzd_per_MWh_heat (default to 20000.0 if missing)
+    if 'unserved_penalty_nzd_per_MWh_heat' in epoch_data:
+        value = epoch_data['unserved_penalty_nzd_per_MWh_heat']
+        if not isinstance(value, (int, float)):
+            raise ValueError(f"Epoch '{epoch_label}', key 'unserved_penalty_nzd_per_MWh_heat': expected numeric value, got {type(value)}")
+        result['unserved_penalty_nzd_per_MWh_heat'] = float(value)
+    else:
+        result['unserved_penalty_nzd_per_MWh_heat'] = 20000.0
+        print(f"[WARN] signals epoch {epoch_label} missing unserved_penalty_nzd_per_MWh_heat; defaulting to 20000.0 NZD/MWh_heat")
+    
     return result
 
 

@@ -29,6 +29,42 @@ import src.maintenance_utils as maint
 import re
 
 
+def normalize_fuel_type(fuel_type) -> str:
+    """
+    Normalize fuel type string by handling aliases and case/whitespace.
+    
+    Maps:
+    - lignite -> coal
+    - biomass -> biomass (kept as-is, since signals use 'biomass_price_nzd_per_MWh_fuel')
+    
+    Args:
+        fuel_type: Raw fuel type string (may have case/whitespace variations)
+        
+    Returns:
+        Normalized fuel type string (or original if None/NaN)
+    """
+    if fuel_type is None:
+        return fuel_type
+    
+    try:
+        if pd.isna(fuel_type):
+            return fuel_type
+    except (TypeError, AttributeError):
+        # Not a pandas-compatible type, continue with string conversion
+        pass
+    
+    # Normalize: lowercase and strip whitespace
+    normalized = str(fuel_type).lower().strip()
+    
+    # Apply aliases
+    alias_map = {
+        'lignite': 'coal',
+        'biomass': 'biomass',  # Keep as-is (signals key is already 'biomass_price_nzd_per_MWh_fuel')
+    }
+    
+    return alias_map.get(normalized, normalized)
+
+
 def parse_epoch_tag(epoch_str: str) -> tuple[int, str, Optional[str]]:
     """
     Parse epoch string into eval_year, epoch_tag, and variant.
@@ -699,7 +735,9 @@ def allocate_dispatch_lp(
     unit_to_idx = {uid: i for i, uid in enumerate(unit_ids)}
     max_heat = {uid: util_df[util_df['unit_id'] == uid]['max_heat_MW'].iloc[0] for uid in unit_ids}
     efficiency = {uid: util_df[util_df['unit_id'] == uid]['efficiency_th'].iloc[0] for uid in unit_ids}
-    fuel_type = {uid: util_df[util_df['unit_id'] == uid]['fuel'].iloc[0].lower().strip() for uid in unit_ids}
+    # Normalize fuel types (lignite->coal, biomass->biomass)
+    fuel_type_raw = {uid: util_df[util_df['unit_id'] == uid]['fuel'].iloc[0] for uid in unit_ids}
+    fuel_type = {uid: normalize_fuel_type(ft) for uid, ft in fuel_type_raw.items()}
     
     # Identify electric units
     electric_units = [
@@ -831,7 +869,7 @@ def allocate_dispatch_lp(
                     raise ValueError(f"No signals row found for timestamp {timestamp}")
                 sig_row = sig_row.iloc[0]
                 
-                if fuel_type[uid] in ['lignite', 'coal']:
+                if fuel_type[uid] == 'coal':  # lignite is normalized to coal
                     fuel_price = sig_row.get('coal_price_nzd_per_MWh_fuel', 0.0)
                 elif fuel_type[uid] == 'biomass':
                     fuel_price = sig_row.get('biomass_price_nzd_per_MWh_fuel', 0.0)
@@ -842,7 +880,7 @@ def allocate_dispatch_lp(
                     fuel_price = 0.0
             else:
                 # Flat prices from dict
-                if fuel_type[uid] in ['lignite', 'coal']:
+                if fuel_type[uid] == 'coal':  # lignite is normalized to coal
                     fuel_price = signals.get('coal_price_nzd_per_MWh_fuel', 0.0)
                 elif fuel_type[uid] == 'biomass':
                     fuel_price = signals.get('biomass_price_nzd_per_MWh_fuel', 0.0)
@@ -1081,8 +1119,9 @@ def compute_marginal_cost_heat(util_row: pd.Series, signals: Dict[str, float]) -
     var_om = util_row.get('var_om_nzd_per_MWh_heat', 0.0)
     
     # Determine fuel price based on fuel type
-    fuel_type = util_row['fuel']
-    if fuel_type in ['lignite', 'coal']:
+    fuel_type_raw = util_row['fuel']
+    fuel_type = normalize_fuel_type(fuel_type_raw)
+    if fuel_type == 'coal':  # lignite is normalized to coal
         fuel_price = signals['coal_price_nzd_per_MWh_fuel']
     elif fuel_type == 'biomass':
         fuel_price = signals['biomass_price_nzd_per_MWh_fuel']
@@ -1396,8 +1435,9 @@ def allocate_dispatch_optimal_subset(
                             co2_tonnes_step = fuel_MWh_step * co2_factor
                             
                             # Fuel cost
-                            fuel_type = util_row['fuel']
-                            if fuel_type in ['lignite', 'coal']:
+                            fuel_type_raw = util_row['fuel']
+                            fuel_type = normalize_fuel_type(fuel_type_raw)
+                            if fuel_type == 'coal':  # lignite is normalized to coal
                                 fuel_price = signals['coal_price_nzd_per_MWh_fuel']
                             elif fuel_type == 'biomass':
                                 fuel_price = signals['biomass_price_nzd_per_MWh_fuel']
@@ -1448,8 +1488,9 @@ def allocate_dispatch_optimal_subset(
                             var_om = util_row.get('var_om_nzd_per_MWh_heat', 0.0)
                             fixed_on = util_row.get('fixed_on_cost_nzd_per_h', 0.0)
                             
-                            fuel_type = util_row['fuel']
-                            if fuel_type in ['lignite', 'coal']:
+                            fuel_type_raw = util_row['fuel']
+                            fuel_type = normalize_fuel_type(fuel_type_raw)
+                            if fuel_type == 'coal':  # lignite is normalized to coal
                                 fuel_price = signals['coal_price_nzd_per_MWh_fuel']
                             elif fuel_type == 'biomass':
                                 fuel_price = signals['biomass_price_nzd_per_MWh_fuel']
@@ -1658,6 +1699,7 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
     dispatch_long['var_om_cost_nzd'] = 0.0
     dispatch_long['fixed_on_cost_nzd'] = 0.0
     dispatch_long['startup_cost_nzd'] = 0.0
+    dispatch_long['electricity_cost_nzd'] = 0.0
     
     # Explicitly zero penalty-cost columns before recompute (avoid double-counting)
     if 'unserved_cost_nzd' in dispatch_long.columns:
@@ -1707,11 +1749,18 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
         startup_cost = util_row.get('startup_cost_nzd', 0.0)
         
         # Fuel type
-        fuel_type = util_row['fuel']
-        if fuel_type in ['lignite', 'coal']:
+        fuel_type_raw = util_row['fuel']
+        fuel_type = normalize_fuel_type(fuel_type_raw)
+        if fuel_type == 'coal':  # lignite is normalized to coal
             fuel_price = signals['coal_price_nzd_per_MWh_fuel']
         elif fuel_type == 'biomass':
             fuel_price = signals['biomass_price_nzd_per_MWh_fuel']
+        elif fuel_type in ['electricity', 'elec', 'grid', 'electrode'] or str(unit_id).upper().startswith('EB'):
+            # EB (electrode boiler) units: use flat electricity price from signals
+            fuel_price = float(signals.get('elec_price_flat_nzd_per_MWh', 0.0))
+            if fuel_price == 0.0:
+                fuel_price = 150.0
+                print(f"[WARN] Electricity price (elec_price_flat_nzd_per_MWh) missing or 0.0 for {unit_id}, defaulting to 150.0 NZD/MWh")
         else:
             fuel_price = 0.0
         
@@ -1723,22 +1772,21 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
         unit_data['fuel_MWh'] = (unit_data['heat_MW'] * dt_h) / efficiency
         unit_data['co2_tonnes'] = unit_data['fuel_MWh'] * co2_factor
         
-        dispatch_long.loc[mask, 'fuel_cost_nzd'] = unit_data['fuel_MWh'] * fuel_price
+        # For electricity/EB units: compute electricity_cost_nzd and set fuel_cost_nzd = electricity_cost_nzd
+        if fuel_type in ['electricity', 'elec', 'grid', 'electrode'] or str(unit_id).upper().startswith('EB'):
+            dispatch_long.loc[mask, 'electricity_cost_nzd'] = unit_data['fuel_MWh'] * fuel_price
+            dispatch_long.loc[mask, 'fuel_cost_nzd'] = dispatch_long.loc[mask, 'electricity_cost_nzd']
+        else:
+            dispatch_long.loc[mask, 'fuel_cost_nzd'] = unit_data['fuel_MWh'] * fuel_price
+        
         dispatch_long.loc[mask, 'carbon_cost_nzd'] = unit_data['co2_tonnes'] * ets_price
         # var_om is NZD/MWh_heat, so multiply by energy (MW * dt_h)
         dispatch_long.loc[mask, 'var_om_cost_nzd'] = unit_data['heat_MW'] * dt_h * var_om
         # fixed_on is per hour, multiply by dt_h for this timestep
         dispatch_long.loc[mask, 'fixed_on_cost_nzd'] = unit_data['unit_on'] * fixed_on * dt_h
         
-        # Unserved cost (if not already computed and penalty rate provided)
-        if 'unserved_cost_nzd' in dispatch_long.columns and unserved_penalty_nzd_per_MWh is not None:
-            # Recompute unserved cost from unserved_MW
-            # Penalty is per MWh, so multiply unserved_MW * dt_h to get energy
-            unserved_mask = mask & (dispatch_long['unserved_MW'] > 0)
-            if unserved_mask.any():
-                dispatch_long.loc[unserved_mask, 'unserved_cost_nzd'] = (
-                    dispatch_long.loc[unserved_mask, 'unserved_MW'] * dt_h * unserved_penalty_nzd_per_MWh
-                )
+        # Note: Unserved cost is computed globally (not per-unit) to avoid duplicate computation.
+        # It is handled above in the global unserved penalty section, so no per-unit recomputation here.
         
         # Reserve penalty cost (if not already computed)
         if 'reserve_penalty_cost_nzd' in dispatch_long.columns:
@@ -1838,7 +1886,8 @@ def recompute_costs_optimal(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
 
 def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame, 
                           signals: Union[Dict[str, float], pd.DataFrame], dt_h: float = 1.0,
-                          unserved_penalty_nzd_per_MWh: Optional[float] = None) -> pd.DataFrame:
+                          unserved_penalty_nzd_per_MWh: Optional[float] = None,
+                          electricity_signals: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """
     Add cost columns to dispatch DataFrame based on fuel type and signals.
     
@@ -1860,6 +1909,23 @@ def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
     fuel_map = dict(zip(util_df['unit_id'], util_df['fuel']))
     dispatch_long['fuel_type'] = dispatch_long['unit_id'].map(fuel_map)
     
+    # Identify EB (electrode boiler) units: fuel in ["electricity", "elec", "grid", "electrode", "eb"] OR unit_id starting with "EB"
+    def is_eb_unit(unit_id: str, fuel_type: str) -> bool:
+        """Check if unit is an electrode boiler (EB) unit."""
+        if pd.isna(unit_id):
+            return False
+        unit_id_str = str(unit_id).upper()
+        if unit_id_str.startswith('EB'):
+            return True
+        if pd.isna(fuel_type):
+            return False
+        fuel_lower = str(fuel_type).lower().strip()
+        return fuel_lower in ['electricity', 'elec', 'grid', 'electrode', 'eb']
+    
+    dispatch_long['is_eb_unit'] = dispatch_long.apply(
+        lambda row: is_eb_unit(row.get('unit_id', ''), row.get('fuel_type', '')), axis=1
+    )
+    
     # Initialize cost columns (ensure they exist and are float dtype)
     if 'fuel_cost_nzd' not in dispatch_long.columns:
         dispatch_long['fuel_cost_nzd'] = 0.0
@@ -1870,6 +1936,12 @@ def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
         dispatch_long['carbon_cost_nzd'] = 0.0
     else:
         dispatch_long['carbon_cost_nzd'] = dispatch_long['carbon_cost_nzd'].astype(float).fillna(0.0)
+    
+    # Initialize electricity_cost_nzd column (for EB units)
+    if 'electricity_cost_nzd' not in dispatch_long.columns:
+        dispatch_long['electricity_cost_nzd'] = 0.0
+    else:
+        dispatch_long['electricity_cost_nzd'] = dispatch_long['electricity_cost_nzd'].astype(float).fillna(0.0)
     
     # Get ETS price (same for all units) - handle missing with warning
     # Handle both dict and DataFrame signals
@@ -1892,11 +1964,13 @@ def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
     # Handle time-varying vs flat signals
     is_time_varying = isinstance(signals, pd.DataFrame)
     
-    # Process by fuel type
-    for fuel_type in dispatch_long['fuel_type'].unique():
-        mask = dispatch_long['fuel_type'] == fuel_type
+    # Process by fuel type (normalize before processing)
+    for fuel_type_raw in dispatch_long['fuel_type'].unique():
+        # Normalize fuel type to handle aliases (lignite->coal, biomass->biomass)
+        fuel_type = normalize_fuel_type(fuel_type_raw)
+        mask = dispatch_long['fuel_type'] == fuel_type_raw  # Use original for mask
         
-        if fuel_type == 'lignite' or fuel_type == 'coal':
+        if fuel_type == 'coal':  # lignite is normalized to coal
             # Use coal price and ETS
             if is_time_varying:
                 # Merge time-varying prices
@@ -1971,33 +2045,91 @@ def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
                     dispatch_long.loc[mask, 'co2_tonnes'] * ets_price
                 )
                 
-        elif fuel_type == 'electricity':
-            # Use time-varying electricity price if available, else flat
-            if is_time_varying:
-                if 'elec_price_nzd_per_MWh' in signals.columns:
-                    dispatch_with_sigs = dispatch_long.loc[mask, ['timestamp_utc', 'fuel_MWh']].merge(
-                        signals[['timestamp_utc', 'elec_price_nzd_per_MWh']],
+        # Check if this fuel type is electricity/EB or if any units in this mask are EB units
+        # Identify EB units: fuel in ['electricity','elec','grid','electrode'] OR unit_id starts with 'EB'
+        is_eb_fuel = fuel_type in ['electricity', 'elec', 'grid', 'electrode']
+        # Check if any units in this mask have unit_id starting with 'EB'
+        if mask.any():
+            unit_ids_in_mask = dispatch_long.loc[mask, 'unit_id'].unique()
+            has_eb_units = any(str(uid).upper().startswith('EB') for uid in unit_ids_in_mask)
+        else:
+            has_eb_units = False
+        
+        if is_eb_fuel or has_eb_units:
+            # Handle EB (electrode boiler) units: electricity-fired units
+            # electricity_MWh = fuel_MWh (already computed as heat_MW*dt_h/efficiency_th)
+            
+            # Signal source selection: ToU CSV -> flat signals -> default 150.0
+            elec_price_used = None
+            tariff_source = None
+            
+            # Priority 1: ToU time-series from electricity_signals CSV if provided and aligned
+            if electricity_signals is not None and 'elec_price_nzd_per_MWh' in electricity_signals.columns:
+                try:
+                    # Try to merge ToU prices
+                    dispatch_with_tou = dispatch_long.loc[mask, ['timestamp_utc', 'fuel_MWh']].merge(
+                        electricity_signals[['timestamp_utc', 'elec_price_nzd_per_MWh']],
                         on='timestamp_utc',
                         how='left'
                     )
-                    if dispatch_with_sigs['elec_price_nzd_per_MWh'].isna().any():
-                        raise ValueError("Electricity price alignment failed: missing timestamps")
-                    dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
-                        dispatch_with_sigs['fuel_MWh'] * dispatch_with_sigs['elec_price_nzd_per_MWh']
-                    ).values
-                else:
-                    # Fallback to flat price from signals dict if present
-                    elec_price = 0.0
+                    if dispatch_with_tou['elec_price_nzd_per_MWh'].isna().any():
+                        # Misaligned timestamps - fall back to flat
+                        print(f"[WARN] Electricity ToU price alignment failed (missing timestamps), falling back to flat price")
+                        elec_price_used = None
+                    else:
+                        # ToU pricing works
+                        elec_price_used = dispatch_with_tou['elec_price_nzd_per_MWh'].values
+                        tariff_source = 'ToU'
+                except Exception as e:
+                    print(f"[WARN] Failed to use electricity ToU pricing: {e}, falling back to flat price")
+                    elec_price_used = None
+            
+            # Priority 2: Flat price from signals config
+            if elec_price_used is None:
+                if is_time_varying:
+                    # signals is a DataFrame - try to get flat price from first row or fallback
                     if hasattr(signals, 'get'):
-                        elec_price = signals.get('electricity_price_nzd_per_MWh_fuel', 0.0)
-                    dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
-                        dispatch_long.loc[mask, 'fuel_MWh'] * elec_price
-                    )
-            else:
-                elec_price = signals.get('electricity_price_nzd_per_MWh_fuel', 0.0)
-                dispatch_long.loc[mask, 'fuel_cost_nzd'] = (
-                    dispatch_long.loc[mask, 'fuel_MWh'] * elec_price
+                        elec_price_flat = signals.get('elec_price_flat_nzd_per_MWh', None)
+                    else:
+                        elec_price_flat = None
+                else:
+                    # signals is a dict
+                    elec_price_flat = signals.get('elec_price_flat_nzd_per_MWh', None)
+                
+                if elec_price_flat is not None and elec_price_flat > 0:
+                    elec_price_used = float(elec_price_flat)
+                    tariff_source = 'flat'
+                    # Print once per run (not per unit)
+                    if not hasattr(add_costs_to_dispatch, '_elec_price_printed'):
+                        print(f"[OK] Electricity price for EB costing: {elec_price_used} NZD/MWh (from signals_config)")
+                        add_costs_to_dispatch._elec_price_printed = True
+                else:
+                    # Priority 3: Default fallback
+                    elec_price_used = 150.0
+                    tariff_source = 'default'
+                    if not hasattr(add_costs_to_dispatch, '_elec_price_warned'):
+                        print(f"[WARN] Electricity price (elec_price_flat_nzd_per_MWh) missing or 0.0, defaulting to {elec_price_used} NZD/MWh")
+                        add_costs_to_dispatch._elec_price_warned = True
+            
+            # Compute electricity_cost_nzd
+            if tariff_source == 'ToU':
+                # Time-varying: multiply per timestep (elec_price_used is an array)
+                dispatch_long.loc[mask, 'electricity_cost_nzd'] = (
+                    dispatch_long.loc[mask, 'fuel_MWh'] * elec_price_used
                 )
+            else:
+                # Flat price: scalar multiplication (elec_price_used is a float)
+                dispatch_long.loc[mask, 'electricity_cost_nzd'] = (
+                    dispatch_long.loc[mask, 'fuel_MWh'] * elec_price_used
+                )
+            
+            # For EB units: fuel_cost_nzd = electricity_cost_nzd
+            dispatch_long.loc[mask, 'fuel_cost_nzd'] = dispatch_long.loc[mask, 'electricity_cost_nzd']
+            
+            # Store tariff source info for later reporting (add as metadata column, will be dropped later)
+            if 'tariff_source' not in dispatch_long.columns:
+                dispatch_long['tariff_source'] = None
+            dispatch_long.loc[mask, 'tariff_source'] = tariff_source
             
             # Electricity has no direct CO2 emissions (grid emissions handled separately)
             dispatch_long.loc[mask, 'carbon_cost_nzd'] = 0.0
@@ -2009,8 +2141,9 @@ def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
             dispatch_long.loc[mask, 'carbon_cost_nzd'] = 0.0
             
         else:
-            # Unknown fuel type - warn but don't fail
-            print(f"[WARNING] Unknown fuel type '{fuel_type}', costs set to zero")
+            # Unknown fuel type - warn but don't fail (only if normalized type is still unknown)
+            # Note: fuel_type here is already normalized, so if it's still unknown, it's truly unknown
+            print(f"[WARNING] Unknown fuel type '{fuel_type_raw}' (normalized: '{fuel_type}'), costs set to zero")
     
     # Ensure unserved_cost_nzd column exists for ALL rows (initialize to 0.0)
     if 'unserved_cost_nzd' not in dispatch_long.columns:
@@ -2019,14 +2152,36 @@ def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
         # Ensure dtype is float and fill NaNs with 0.0
         dispatch_long['unserved_cost_nzd'] = dispatch_long['unserved_cost_nzd'].astype(float).fillna(0.0)
     
-    # Add unserved penalty cost for UNSERVED rows (if penalty rate provided)
+    # Ensure unserved_MW column exists (initialize to 0.0)
+    if 'unserved_MW' not in dispatch_long.columns:
+        dispatch_long['unserved_MW'] = 0.0
+    else:
+        dispatch_long['unserved_MW'] = dispatch_long['unserved_MW'].astype(float).fillna(0.0)
+    
+    # If unmet demand is represented as unit_id == 'UNSERVED' with heat_MW, copy into unserved_MW
+    # This ensures proportional mode (which uses UNSERVED rows) gets penalty cost computed correctly
+    if 'unit_id' in dispatch_long.columns and 'heat_MW' in dispatch_long.columns:
+        unserved_rows = dispatch_long['unit_id'] == 'UNSERVED'
+        if unserved_rows.any():
+            dispatch_long.loc[unserved_rows, 'unserved_MW'] = dispatch_long.loc[unserved_rows, 'heat_MW'].fillna(0.0)
+    
+    # Add unserved penalty cost (if penalty rate provided)
+    # This handles both UNSERVED rows (proportional mode) and unserved_MW > 0 rows (LP/optimal modes)
     if unserved_penalty_nzd_per_MWh is not None and unserved_penalty_nzd_per_MWh > 0:
         # For UNSERVED rows: penalty cost = heat_MW * dt_h * penalty_rate
-        # heat_MW is already average MW per timestep, so energy = heat_MW * dt_h
+        # For other rows with unserved_MW > 0: penalty cost = unserved_MW * dt_h * penalty_rate
         unserved_mask = dispatch_long['unit_id'] == 'UNSERVED'
         if unserved_mask.any():
+            # UNSERVED rows: use heat_MW (already copied to unserved_MW above, but use heat_MW for clarity)
             dispatch_long.loc[unserved_mask, 'unserved_cost_nzd'] = (
                 dispatch_long.loc[unserved_mask, 'heat_MW'] * dt_h * unserved_penalty_nzd_per_MWh
+            ).astype(float)
+        
+        # Also handle rows where unserved_MW > 0 but unit_id != 'UNSERVED' (LP/optimal modes)
+        unserved_mw_mask = (dispatch_long['unserved_MW'] > 0) & (~unserved_mask)
+        if unserved_mw_mask.any():
+            dispatch_long.loc[unserved_mw_mask, 'unserved_cost_nzd'] = (
+                dispatch_long.loc[unserved_mw_mask, 'unserved_MW'] * dt_h * unserved_penalty_nzd_per_MWh
             ).astype(float)
     
     # Total cost (includes all components)
@@ -2045,8 +2200,11 @@ def add_costs_to_dispatch(dispatch_long: pd.DataFrame, util_df: pd.DataFrame,
     dispatch_long['fuel_cost_nzd'] = dispatch_long['fuel_cost_nzd'].astype(float)
     dispatch_long['carbon_cost_nzd'] = dispatch_long['carbon_cost_nzd'].astype(float)
     
-    # Drop fuel_type column (it was just for internal use)
-    dispatch_long = dispatch_long.drop(columns=['fuel_type'])
+    # Drop internal columns (fuel_type, is_eb_unit, tariff_source)
+    cols_to_drop = ['fuel_type', 'is_eb_unit']
+    if 'tariff_source' in dispatch_long.columns:
+        cols_to_drop.append('tariff_source')
+    dispatch_long = dispatch_long.drop(columns=[col for col in cols_to_drop if col in dispatch_long.columns])
     
     return dispatch_long
 
@@ -2130,9 +2288,137 @@ def aggregate_system_costs(dispatch_long: pd.DataFrame) -> dict:
     return system_costs
 
 
+def load_tariff_for_summary(output_dir: Optional[Path] = None, epoch_tag: Optional[str] = None) -> Optional[pd.Series]:
+    """
+    Load tariff time series for electricity cost computation.
+    
+    Priority:
+    1. signals_used/tariff_nzd_per_MWh_<epoch_tag>.csv in run directory
+    2. regional_signals/<runid>/signals/tariff_nzd_per_MWh_<epoch_tag>.csv in bundle
+    3. Return None if neither exists
+    
+    Args:
+        output_dir: Output directory (run directory) to search for signals_used
+        epoch_tag: Epoch tag for filename matching
+        
+    Returns:
+        Series with tariff_nzd_per_MWh indexed by timestamp, or None if not found
+    """
+    if output_dir is None or epoch_tag is None:
+        return None
+    
+    output_dir = Path(output_dir)
+    
+    # Try signals_used first (highest priority)
+    signals_used_dir = output_dir / 'signals_used'
+    tariff_csv = signals_used_dir / f'tariff_nzd_per_MWh_{epoch_tag}.csv'
+    
+    if tariff_csv.exists():
+        try:
+            df = pd.read_csv(tariff_csv)
+            # Find timestamp column
+            ts_col = None
+            for candidate in ['timestamp_utc', 'timestamp']:
+                if candidate in df.columns:
+                    ts_col = candidate
+                    break
+            
+            if ts_col is None:
+                return None
+            
+            # Find tariff column
+            tariff_col = None
+            for candidate in ['tariff_nzd_per_MWh', 'tariff', 'elec_price_nzd_per_MWh']:
+                if candidate in df.columns:
+                    tariff_col = candidate
+                    break
+            
+            if tariff_col is None:
+                return None
+            
+            # Parse timestamps
+            df[ts_col] = parse_any_timestamp(df[ts_col])
+            df = df.set_index(ts_col)
+            
+            tariff_series = df[tariff_col]
+            print(f"[OK] Loaded tariff from signals_used: {tariff_csv}")
+            return tariff_series
+        except Exception as e:
+            print(f"[WARN] Failed to load tariff from {tariff_csv}: {e}")
+    
+    # Try regional_signals in bundle (if output_dir is in a bundle structure)
+    # Look for bundle parent: Output/runs/<bundle>/epoch<epoch_tag>/regional_signals/...
+    if 'runs' in output_dir.parts:
+        # Find bundle and epoch from path
+        try:
+            runs_idx = output_dir.parts.index('runs')
+            if runs_idx + 1 < len(output_dir.parts):
+                bundle_name = output_dir.parts[runs_idx + 1]
+                # Try to find epoch directory in path
+                epoch_dir = None
+                for part in output_dir.parts:
+                    if part.startswith('epoch'):
+                        epoch_dir = part
+                        break
+                
+                if epoch_dir:
+                    # Construct path to regional_signals: Output/runs/<bundle>/epoch<epoch_tag>/regional_signals/...
+                    # output_dir is typically: Output/runs/<bundle>/epoch<epoch_tag>/dispatch/<runid>
+                    # So we need to go up to epoch directory level
+                    epoch_path = None
+                    for i, part in enumerate(output_dir.parts):
+                        if part.startswith('epoch'):
+                            # Reconstruct path up to and including epoch directory
+                            epoch_path = Path(*output_dir.parts[:i+1])
+                            break
+                    
+                    if epoch_path:
+                        regional_signals_dir = epoch_path / 'regional_signals'
+                        # Try to find any runid subdirectory
+                        if regional_signals_dir.exists():
+                            for runid_dir in regional_signals_dir.iterdir():
+                                if runid_dir.is_dir():
+                                    tariff_csv = runid_dir / 'signals' / f'tariff_nzd_per_MWh_{epoch_tag}.csv'
+                                    if tariff_csv.exists():
+                                        try:
+                                            df = pd.read_csv(tariff_csv)
+                                            ts_col = None
+                                            for candidate in ['timestamp_utc', 'timestamp']:
+                                                if candidate in df.columns:
+                                                    ts_col = candidate
+                                                    break
+                                            if ts_col is None:
+                                                continue
+                                            
+                                            tariff_col = None
+                                            for candidate in ['tariff_nzd_per_MWh', 'tariff']:
+                                                if candidate in df.columns:
+                                                    tariff_col = candidate
+                                                    break
+                                            if tariff_col is None:
+                                                continue
+                                            
+                                            df[ts_col] = parse_any_timestamp(df[ts_col])
+                                            df = df.set_index(ts_col)
+                                            tariff_series = df[tariff_col]
+                                            print(f"[OK] Loaded tariff from regional_signals: {tariff_csv}")
+                                            return tariff_series
+                                        except Exception as e:
+                                            print(f"[WARN] Failed to load tariff from {tariff_csv}: {e}")
+                                            continue
+        except Exception as e:
+            print(f"[WARN] Failed to parse path for regional_signals: {e}")
+            pass  # Path parsing failed, continue
+    
+    print(f"[WARN] Tariff not found for {epoch_tag}. Tried signals_used and regional_signals.")
+    return None
+
+
 def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.0, dt_h: float = 1.0,
                            unserved_penalty_nzd_per_MWh: Optional[float] = None,
-                           reserve_penalty_nzd_per_MWh: Optional[float] = None) -> pd.DataFrame:
+                           reserve_penalty_nzd_per_MWh: Optional[float] = None,
+                           output_dir: Optional[Path] = None,
+                           epoch_tag: Optional[str] = None) -> pd.DataFrame:
     """
     Compute annual totals and key indicators by unit, plus SYSTEM and TOTAL rows.
     
@@ -2178,6 +2464,10 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         # For UNSERVED: unserved_cost_nzd is the unit's cost; for real units it's 0
         agg_dict['unserved_cost_nzd'] = 'sum'
     
+    # Add electricity_cost_nzd aggregation if present (for EB units)
+    if 'electricity_cost_nzd' in dispatch_long.columns:
+        agg_dict['electricity_cost_nzd'] = 'sum'
+    
     annual_by_unit = dispatch_long.groupby('unit_id').agg(agg_dict)
     
     # Recompute unit-level total_cost_nzd
@@ -2209,6 +2499,43 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     annual_by_unit['annual_fuel_cost_nzd'] = annual_by_unit['fuel_cost_nzd']
     annual_by_unit['annual_carbon_cost_nzd'] = annual_by_unit['carbon_cost_nzd']
     annual_by_unit['annual_total_cost_nzd'] = annual_by_unit['total_cost_nzd']
+    
+    # Add electricity columns: identify EB units and compute electricity_MWh from fuel_MWh
+    # EB units: unit_id starts with "EB" OR fuel/carrier equals "electricity"
+    # Initialize electricity columns for all units
+    annual_by_unit['annual_electricity_MWh'] = 0.0
+    annual_by_unit['annual_electricity_cost_nzd'] = 0.0
+    # Initialize new total columns for all units (will be computed later for TOTAL row)
+    annual_by_unit['annual_electricity_MWh_total'] = 0.0
+    annual_by_unit['annual_electricity_cost_nzd_total'] = 0.0
+    annual_by_unit['avg_electricity_tariff_nzd_per_MWh'] = 0.0
+    
+    # Identify EB units: check unit_id pattern and fuel_type if available
+    for unit_id in annual_by_unit.index:
+        if unit_id == 'UNSERVED':
+            continue  # Skip UNSERVED
+        
+        is_eb_unit = False
+        # Check unit_id pattern
+        if str(unit_id).upper().startswith('EB'):
+            is_eb_unit = True
+        # Check fuel_type if available in dispatch_long
+        elif 'fuel_type' in dispatch_long.columns:
+            unit_fuel_types = dispatch_long[dispatch_long['unit_id'] == unit_id]['fuel_type'].unique()
+            if len(unit_fuel_types) > 0:
+                fuel_lower = str(unit_fuel_types[0]).lower().strip() if not pd.isna(unit_fuel_types[0]) else ''
+                if fuel_lower in ['electricity', 'elec', 'grid', 'electrode', 'eb']:
+                    is_eb_unit = True
+        
+        if is_eb_unit:
+            # This is an EB unit: electricity_MWh = fuel_MWh
+            annual_by_unit.loc[unit_id, 'annual_electricity_MWh'] = annual_by_unit.loc[unit_id, 'annual_fuel_MWh']
+            # Set electricity_cost_nzd if available
+            if 'electricity_cost_nzd' in annual_by_unit.columns:
+                annual_by_unit.loc[unit_id, 'annual_electricity_cost_nzd'] = annual_by_unit.loc[unit_id, 'electricity_cost_nzd']
+            else:
+                # Fallback: use fuel_cost_nzd for EB units (they're the same)
+                annual_by_unit.loc[unit_id, 'annual_electricity_cost_nzd'] = annual_by_unit.loc[unit_id, 'annual_fuel_cost_nzd']
     
     # Compute average cost per MWh_heat (safe when annual heat is zero)
     # avg_cost = total_cost / (heat_GWh * 1000) to get cost per MWh
@@ -2310,6 +2637,10 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         if 'unserved_cost_nzd' not in annual_by_unit.columns:
             annual_by_unit['unserved_cost_nzd'] = 0.0
         annual_by_unit.loc['UNSERVED', 'unserved_cost_nzd'] = unserved_penalty
+        # UNSERVED has no electricity consumption (columns already initialized above)
+        annual_by_unit.loc['UNSERVED', 'annual_electricity_MWh_total'] = 0.0
+        annual_by_unit.loc['UNSERVED', 'annual_electricity_cost_nzd_total'] = 0.0
+        annual_by_unit.loc['UNSERVED', 'avg_electricity_tariff_nzd_per_MWh'] = 0.0
     
     annual_by_unit['avg_operational_cost_nzd_per_MWh_heat'] = annual_by_unit['avg_cost_nzd_per_MWh_heat']
     
@@ -2348,6 +2679,7 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     total_system_penalties_nzd = unserved_penalty_cost_nzd + reserve_penalty_cost_nzd
     
     # Create SYSTEM row for system penalties
+    # Note: electricity totals computed later, initialize to 0 for SYSTEM
     system_dict = {
         'heat_MW': 0.0,
         'fuel_MWh': 0.0,
@@ -2366,6 +2698,9 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         'annual_system_cost_nzd': total_system_penalties_nzd + system_costs.get('online_cost_nzd', 0.0),  # Penalties + online
         'avg_cost_nzd_per_MWh_heat': 0.0,
         'avg_operational_cost_nzd_per_MWh_heat': 0.0,
+        'annual_electricity_MWh_total': 0.0,  # SYSTEM has no electricity
+        'annual_electricity_cost_nzd_total': 0.0,
+        'avg_electricity_tariff_nzd_per_MWh': 0.0,
     }
     # Add optimal mode unit columns (set to 0 for system row)
     if 'var_om_cost_nzd' in annual_by_unit.columns:
@@ -2413,6 +2748,99 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
     # Create TOTAL row (unit costs + system costs)
     # Note: heat_MW sum is sum of average MW per step; convert to GWh using dt_h
     total_heat_GWh = (annual_by_unit['heat_MW'].sum() * dt_h) / 1000.0
+    
+    # Compute electricity totals (sum from all units)
+    total_electricity_MWh = annual_by_unit['annual_electricity_MWh'].sum()
+    total_electricity_cost_nzd = annual_by_unit['annual_electricity_cost_nzd'].sum()
+    
+    # Compute electricity totals from hourly traces if available
+    # For EB units, fuel_MWh represents electricity consumption
+    annual_electricity_MWh_total = total_electricity_MWh
+    annual_electricity_cost_nzd_total = total_electricity_cost_nzd
+    
+    # Identify EB units in dispatch_long
+    dispatch_long_for_elec = dispatch_long.copy()
+    if not pd.api.types.is_datetime64_any_dtype(dispatch_long_for_elec['timestamp_utc']):
+        dispatch_long_for_elec['timestamp_utc'] = parse_any_timestamp(dispatch_long_for_elec['timestamp_utc'])
+    
+    # Identify EB units: unit_id starts with "EB" OR fuel_type equals "electricity"
+    eb_mask = False
+    if 'unit_id' in dispatch_long_for_elec.columns:
+        eb_mask = dispatch_long_for_elec['unit_id'].astype(str).str.upper().str.startswith('EB', na=False)
+    if 'fuel_type' in dispatch_long_for_elec.columns:
+        fuel_eb_mask = dispatch_long_for_elec['fuel_type'].astype(str).str.lower().str.strip().isin(['electricity', 'elec', 'grid', 'electrode', 'eb'])
+        eb_mask = eb_mask | fuel_eb_mask
+    
+    # Exclude UNSERVED rows
+    if 'unit_id' in dispatch_long_for_elec.columns:
+        eb_mask = eb_mask & (dispatch_long_for_elec['unit_id'] != 'UNSERVED')
+    
+    # Compute electricity totals from EB units' fuel_MWh (which is electricity for EB units)
+    if eb_mask.sum() > 0:
+        eb_dispatch = dispatch_long_for_elec[eb_mask]
+        annual_electricity_MWh_total = float(eb_dispatch['fuel_MWh'].sum())
+        print(f"[OK] Computed annual_electricity_MWh_total from hourly traces (EB units): {annual_electricity_MWh_total:.2f} MWh")
+    
+    # Try to load tariff and compute cost from hourly traces
+    tariff_series = None
+    if output_dir is not None and epoch_tag is not None:
+        tariff_series = load_tariff_for_summary(output_dir, epoch_tag)
+    
+    if tariff_series is not None and eb_mask.sum() > 0:
+        # Compute cost from hourly traces × tariff
+        # Group by timestamp and sum fuel_MWh (electricity) per hour for EB units
+        hourly_electricity = eb_dispatch.groupby('timestamp_utc')['fuel_MWh'].sum()
+        
+        # Align tariff with hourly electricity timestamps
+        tariff_aligned = tariff_series.reindex(hourly_electricity.index, method='nearest').fillna(0.0)
+        
+        # Compute cost: sum(electricity_MWh * tariff)
+        annual_electricity_cost_nzd_total = float((hourly_electricity * tariff_aligned).sum())
+        print(f"[OK] Computed annual_electricity_cost_nzd_total from hourly traces × tariff: {annual_electricity_cost_nzd_total:.2f} NZD")
+    elif annual_electricity_MWh_total > 0 and total_electricity_cost_nzd == 0:
+        # If we have electricity consumption but no cost, and no tariff available, warn
+        print(f"[WARN] Electricity consumption detected ({annual_electricity_MWh_total:.2f} MWh) but no cost computed. Tariff not available.")
+    
+    # Compute average tariff
+    avg_electricity_tariff_nzd_per_MWh = (
+        annual_electricity_cost_nzd_total / annual_electricity_MWh_total
+        if annual_electricity_MWh_total > 0 else 0.0
+    )
+    
+    # Compute derived electricity totals from EB units (for cases where explicit fields are zero)
+    # Identify electricity-consuming units: unit_id starts with "EB" OR fuel_type equals "electricity"
+    # Filter out UNSERVED and SYSTEM rows
+    eb_units_mask = (
+        annual_by_unit.index.str.upper().str.startswith('EB', na=False) &
+        (~annual_by_unit.index.isin(['UNSERVED', 'SYSTEM']))
+    )
+    # Also check if fuel_type column exists in dispatch_long to identify EB units by fuel type
+    if 'fuel_type' in dispatch_long.columns:
+        # Get unique unit_ids that have fuel_type == 'electricity' (case-insensitive)
+        elec_fuel_units = dispatch_long[
+            dispatch_long['fuel_type'].str.lower().str.strip().isin(['electricity', 'elec', 'grid', 'electrode', 'eb'])
+        ]['unit_id'].unique()
+        elec_fuel_mask = annual_by_unit.index.isin(elec_fuel_units) & (~annual_by_unit.index.isin(['UNSERVED', 'SYSTEM']))
+        eb_units_mask = eb_units_mask | elec_fuel_mask
+    
+    # For EB units, fuel_MWh represents electricity consumption
+    annual_electricity_MWh_derived = annual_by_unit.loc[eb_units_mask, 'annual_fuel_MWh'].sum()
+    annual_electricity_cost_nzd_derived = annual_by_unit.loc[eb_units_mask, 'annual_fuel_cost_nzd'].sum()
+    
+    # Compute effective values: prefer existing reported fields when non-zero, otherwise use derived
+    annual_electricity_MWh_effective = total_electricity_MWh if total_electricity_MWh > 0 else annual_electricity_MWh_derived
+    annual_electricity_cost_nzd_effective = total_electricity_cost_nzd if total_electricity_cost_nzd > 0 else annual_electricity_cost_nzd_derived
+    avg_electricity_tariff_nzd_per_MWh_effective = (
+        annual_electricity_cost_nzd_effective / annual_electricity_MWh_effective
+        if annual_electricity_MWh_effective > 0 else 0.0
+    )
+    
+    # Compute derived tariff (for reporting)
+    avg_electricity_tariff_nzd_per_MWh_derived = (
+        annual_electricity_cost_nzd_derived / annual_electricity_MWh_derived
+        if annual_electricity_MWh_derived > 0 else 0.0
+    )
+    
     total_dict = {
         'heat_MW': annual_by_unit['heat_MW'].sum(),  # Sum of average MW per step
         'fuel_MWh': annual_by_unit['fuel_MWh'].sum(),  # Sum of energy per step
@@ -2443,7 +2871,24 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
             total_operational_cost_nzd /
             (total_heat_GWh * 1000.0) if total_heat_GWh > 0 else 0.0
         ),  # Operational cost per MWh served
+        # Add electricity columns (may be zero if no EB units or if not explicitly reported)
+        'annual_electricity_MWh': total_electricity_MWh,
+        'annual_electricity_cost_nzd': total_electricity_cost_nzd,
+        'avg_electricity_tariff_nzd_per_MWh': avg_electricity_tariff_nzd_per_MWh,  # Use computed value from hourly traces
+        # Add derived electricity columns (from EB unit fuel accounting)
+        'annual_electricity_MWh_derived': annual_electricity_MWh_derived,
+        'annual_electricity_cost_nzd_derived': annual_electricity_cost_nzd_derived,
+        'avg_electricity_tariff_nzd_per_MWh_derived': avg_electricity_tariff_nzd_per_MWh_derived,
+        # Add effective electricity columns (prefer reported, fallback to derived)
+        'annual_electricity_MWh_effective': annual_electricity_MWh_effective,
+        'annual_electricity_cost_nzd_effective': annual_electricity_cost_nzd_effective,
+        'avg_electricity_tariff_nzd_per_MWh_effective': avg_electricity_tariff_nzd_per_MWh_effective,
+        # Add new total columns (computed from hourly traces if available)
+        'annual_electricity_MWh_total': annual_electricity_MWh_total,
+        'annual_electricity_cost_nzd_total': annual_electricity_cost_nzd_total,
     }
+    # Update avg_electricity_tariff_nzd_per_MWh with computed value (overwrite if already set)
+    total_dict['avg_electricity_tariff_nzd_per_MWh'] = avg_electricity_tariff_nzd_per_MWh
     
     # Add optimal mode unit totals
     if 'var_om_cost_nzd' in annual_by_unit.columns:
@@ -2529,12 +2974,74 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
         if col in summary.columns:
             output_cols.append(col)
     
+    # Add electricity columns if present (for all rows, stable CSV schema)
+    electricity_cols = [
+        'annual_electricity_MWh', 'annual_electricity_cost_nzd', 'avg_electricity_tariff_nzd_per_MWh',
+        'annual_electricity_MWh_derived', 'annual_electricity_cost_nzd_derived', 'avg_electricity_tariff_nzd_per_MWh_derived',
+        'annual_electricity_MWh_effective', 'annual_electricity_cost_nzd_effective', 'avg_electricity_tariff_nzd_per_MWh_effective',
+        'annual_electricity_MWh_total', 'annual_electricity_cost_nzd_total'
+    ]
+    for col in electricity_cols:
+        if col in summary.columns:
+            output_cols.append(col)
+    
+    # Ensure all penalty-related columns exist and are numeric (0.0 instead of NaN) for ALL rows
+    penalty_cols_to_init = ['unserved_MWh', 'unserved_penalty_cost_nzd', 'reserve_shortfall_MWh', 
+                            'reserve_penalty_cost_nzd', 'total_penalty_cost_nzd', 'unserved_cost_nzd']
+    for col in penalty_cols_to_init:
+        if col not in summary.columns:
+            summary[col] = 0.0
+        else:
+            # Fill NaNs with 0.0
+            summary[col] = summary[col].fillna(0.0).astype(float)
+    
+    # Ensure electricity columns exist for ALL rows (for stable CSV schema)
+    # For non-TOTAL rows, these will be 0.0 or NaN (filled below)
+    electricity_cols = [
+        'annual_electricity_MWh', 'annual_electricity_cost_nzd', 'avg_electricity_tariff_nzd_per_MWh',
+        'annual_electricity_MWh_derived', 'annual_electricity_cost_nzd_derived', 'avg_electricity_tariff_nzd_per_MWh_derived',
+        'annual_electricity_MWh_effective', 'annual_electricity_cost_nzd_effective', 'avg_electricity_tariff_nzd_per_MWh_effective'
+    ]
+    for col in electricity_cols:
+        if col not in summary.columns:
+            summary[col] = 0.0
+        else:
+            # Fill NaNs with 0.0 for all rows except TOTAL (TOTAL has computed values)
+            summary[col] = summary[col].fillna(0.0)
+            # Ensure numeric type
+            summary[col] = pd.to_numeric(summary[col], errors='coerce').fillna(0.0)
+    
     # Compute annual_penalty_cost_nzd for all rows (unserved + reserve)
-    # Use .get() with defaults to handle missing columns
+    # Handle NaNs properly: treat NaN as 0.0
     for idx in summary.index:
-        unserved = summary.loc[idx, 'unserved_cost_nzd'] if 'unserved_cost_nzd' in summary.columns else 0.0
-        reserve = summary.loc[idx, 'reserve_penalty_cost_nzd'] if 'reserve_penalty_cost_nzd' in summary.columns else 0.0
-        summary.loc[idx, 'annual_penalty_cost_nzd'] = unserved + reserve
+        unit_id = summary.loc[idx, 'unit_id'] if 'unit_id' in summary.columns else summary.index[idx]
+        
+        # Get unserved and reserve costs, treating NaN as 0.0
+        unserved_cost = summary.loc[idx, 'unserved_cost_nzd'] if 'unserved_cost_nzd' in summary.columns else 0.0
+        if pd.isna(unserved_cost):
+            unserved_cost = 0.0
+        else:
+            unserved_cost = float(unserved_cost)
+        
+        reserve_cost = summary.loc[idx, 'reserve_penalty_cost_nzd'] if 'reserve_penalty_cost_nzd' in summary.columns else 0.0
+        if pd.isna(reserve_cost):
+            reserve_cost = 0.0
+        else:
+            reserve_cost = float(reserve_cost)
+        
+        # Set alias columns for clarity (all rows get these, even if 0.0)
+        summary.loc[idx, 'unserved_penalty_cost_nzd'] = unserved_cost
+        summary.loc[idx, 'total_penalty_cost_nzd'] = unserved_cost + reserve_cost
+        
+        # Compute annual_penalty_cost_nzd (unserved + reserve)
+        summary.loc[idx, 'annual_penalty_cost_nzd'] = unserved_cost + reserve_cost
+        
+        # For UNSERVED rows: set unserved_MWh = annual_heat_GWh * 1000.0
+        if unit_id == 'UNSERVED':
+            annual_heat_GWh = summary.loc[idx, 'annual_heat_GWh'] if 'annual_heat_GWh' in summary.columns else 0.0
+            if pd.isna(annual_heat_GWh):
+                annual_heat_GWh = 0.0
+            summary.loc[idx, 'unserved_MWh'] = float(annual_heat_GWh) * 1000.0
     
     # Compute annual_system_cost_nzd for SYSTEM and TOTAL rows only (penalty + online)
     for idx in summary.index:
@@ -2548,7 +3055,9 @@ def compute_annual_summary(dispatch_long: pd.DataFrame, reserve_frac: float = 0.
             summary.loc[idx, 'annual_system_cost_nzd'] = 0.0
     
     # Ensure unit_id is first column
-    final_cols = ['unit_id'] + [col for col in output_cols if col in summary.columns and col != 'unit_id']
+    # Prevent duplicate columns: dedupe output_cols while preserving order
+    deduped = list(dict.fromkeys(output_cols))
+    final_cols = ['unit_id'] + [col for col in deduped if col in summary.columns and col != 'unit_id']
     result = summary[final_cols].copy()
     
     # Assert unit_id column exists before returning
@@ -3028,8 +3537,8 @@ def main():
                        help='Dispatch mode: proportional (default), optimal_subset, or lp (linear programming with equality constraints)')
     parser.add_argument('--commitment-block-hours', type=int, default=24,
                        help='Hours per commitment block for optimal_subset mode (default: 24 = daily)')
-    parser.add_argument('--unserved-penalty-nzd-per-MWh', type=float, default= 10000.0,
-                       help='Penalty for unserved demand in optimal_subset mode (default: 50000)')
+    parser.add_argument('--unserved-penalty-nzd-per-MWh', type=float, default=None,
+                       help='Penalty for unserved demand (default: from signals config, else 20000.0). Overrides signals config if provided.')
     parser.add_argument('--reserve-frac', type=float, default=0.0,
                        help='Reserve requirement fraction of demand for optimal_subset mode (default: 0.0)')
     parser.add_argument('--reserve-penalty-nzd-per-MWh', type=float, default=0.0,
@@ -3070,6 +3579,10 @@ def main():
                        help='Automatically find first availability==0 window and run only [start-24h, end+24h)')
     parser.add_argument('--validate-maintenance', action='store_true',
                        help='Validate maintenance windows only (no optimization, no figures). Loads demand, utilities, and maintenance, then prints PASS/FAIL summary.')
+    parser.add_argument('--validate-only', action='store_true',
+                       help='Enable strict validation mode: fail fast on validation errors (e.g., EB units with fuel but no cost)')
+    parser.add_argument('--self-test', action='store_true',
+                       help='Run self-test: validate electricity effective columns when EB units are present')
 
     args = parser.parse_args()
     
@@ -3428,6 +3941,14 @@ def main():
         print(f"[WARN] Epoch mapping: eval_epoch_tag {epoch_tag} (year {eval_year}) -> signals_epoch {signals_epoch}")
     signals = get_signals_for_epoch(signals_config, str(signals_epoch))
     
+    # Get unserved penalty rate from signals (with CLI override for backward compatibility)
+    default_penalty = float(signals.get('unserved_penalty_nzd_per_MWh_heat', 20000.0))
+    unserved_penalty_nzd_per_MWh = default_penalty
+    # Optional: CLI override if user provided one (keep backwards compatibility)
+    if hasattr(args, 'unserved_penalty_nzd_per_MWh') and args.unserved_penalty_nzd_per_MWh is not None:
+        unserved_penalty_nzd_per_MWh = float(args.unserved_penalty_nzd_per_MWh)
+        print(f"[INFO] Using CLI override for unserved penalty: {unserved_penalty_nzd_per_MWh} NZD/MWh (signals default: {default_penalty})")
+    
     # Load maintenance windows using new module (epoch-aware)
     maintenance_availability = None
     maintenance_availability_wide = None  # Wide-form for dispatch functions
@@ -3491,6 +4012,7 @@ def main():
     
     # Load electricity signals if provided (for ToU pricing and headroom)
     electricity_signals = None
+    electricity_tariff_source = None  # Track tariff source for reporting
     if args.electricity_signals_csv:
         elec_sig_path = resolve_path(args.electricity_signals_csv)
         print(f"Loading electricity signals from {elec_sig_path}...")
@@ -3500,20 +4022,44 @@ def main():
             # Align to demand timestamps
             from src.load_gxp_signals import align_signals_to_demand as align_elec_signals
             electricity_signals = align_elec_signals(electricity_signals, demand_df, "electricity_signals")
-            print(f"[OK] Loaded electricity signals with ToU pricing and headroom")
+            # Check if elec_price_nzd_per_MWh column exists
+            if 'elec_price_nzd_per_MWh' in electricity_signals.columns:
+                print(f"[OK] Loaded electricity signals with ToU pricing and headroom")
+                electricity_tariff_source = 'ToU'
+            else:
+                print(f"[WARN] Electricity signals CSV loaded but missing elec_price_nzd_per_MWh column, will use flat price")
+                electricity_tariff_source = None
         except Exception as e:
-            raise ValueError(f"Failed to load electricity signals: {e}")
+            print(f"[WARN] Failed to load electricity signals CSV: {e}, will use flat price from signals config")
+            electricity_signals = None
+            electricity_tariff_source = None
+    
+    # Determine flat electricity price from signals config (for fallback or default use)
+    elec_price_flat = signals.get('elec_price_flat_nzd_per_MWh', None)
+    if elec_price_flat is not None:
+        if electricity_tariff_source is None:
+            electricity_tariff_source = 'flat'
+            # Debug-only: remove duplicate log (pricing info printed inside add_costs_to_dispatch)
+            if os.environ.get("DISPATCH_DEBUG", "0") == "1":
+                print(f"[DEBUG] Using flat electricity price {elec_price_flat} NZD/MWh for EB costing")
+    elif electricity_tariff_source is None:
+        # No ToU, no flat price in signals - will use default 150.0 in add_costs_to_dispatch
+        electricity_tariff_source = 'default'
+        # Debug-only: remove duplicate log (warning printed inside add_costs_to_dispatch)
+        if os.environ.get("DISPATCH_DEBUG", "0") == "1":
+            print(f"[DEBUG] No electricity price found in signals config, will default to 150.0 NZD/MWh for EB costing")
     
     # Prepare signals for dispatch (time-varying if electricity_signals provided, else flat dict)
     if electricity_signals is not None:
         # Merge electricity prices into signals DataFrame if not already present
         if 'elec_price_nzd_per_MWh' not in electricity_signals.columns:
             # Fallback to flat price from signals dict
-            if 'electricity_price_nzd_per_MWh_fuel' in signals:
-                electricity_signals['elec_price_nzd_per_MWh'] = signals['electricity_price_nzd_per_MWh_fuel']
+            elec_price_flat = signals.get('elec_price_flat_nzd_per_MWh', None)
+            if elec_price_flat is not None:
+                electricity_signals['elec_price_nzd_per_MWh'] = elec_price_flat
             else:
-                electricity_signals['elec_price_nzd_per_MWh'] = 0.0
-                print("[WARN] No electricity price found, defaulting to 0.0")
+                electricity_signals['elec_price_nzd_per_MWh'] = 150.0
+                print("[WARN] No electricity price found in signals, defaulting to 150.0 NZD/MWh")
         
         # Add other signal prices (flat) to each row
         for key in ['coal_price_nzd_per_MWh_fuel', 'biomass_price_nzd_per_MWh_fuel', 'ets_price_nzd_per_tCO2']:
@@ -3623,10 +4169,16 @@ def main():
     if args.mode == 'lp':
         # LP mode may have time-varying electricity prices from electricity_signals
         # Pass unserved_penalty so it's computed correctly
+        # Use CLI override if provided, else use signals value
+        penalty_for_lp = args.unserved_penalty_nzd_per_MWh if hasattr(args, 'unserved_penalty_nzd_per_MWh') and args.unserved_penalty_nzd_per_MWh is not None else unserved_penalty_nzd_per_MWh
         dispatch_long = add_costs_to_dispatch(dispatch_long, util_df, signals_for_dispatch, dt_h,
-                                               unserved_penalty_nzd_per_MWh=args.unserved_penalty_nzd_per_MWh)
+                                               unserved_penalty_nzd_per_MWh=penalty_for_lp,
+                                               electricity_signals=electricity_signals)
     else:
-        dispatch_long = add_costs_to_dispatch(dispatch_long, util_df, signals, dt_h)
+        # For proportional and optimal_subset modes, always pass penalty from signals (with CLI override)
+        dispatch_long = add_costs_to_dispatch(dispatch_long, util_df, signals, dt_h,
+                                               unserved_penalty_nzd_per_MWh=unserved_penalty_nzd_per_MWh,
+                                               electricity_signals=electricity_signals)
     
     # Validate dispatch outputs (energy closure, schema, etc.) - AFTER costs are added
     validate_dispatch_outputs(dispatch_long, dispatch_wide, demand_df, dt_h,
@@ -3692,16 +4244,44 @@ def main():
     # Pass penalty rates to ensure penalty costs are computed correctly
     unserved_penalty_rate = getattr(args, 'unserved_penalty_nzd_per_MWh', None)
     reserve_penalty_rate = getattr(args, 'reserve_penalty_nzd_per_MWh', None)
+    # Pass output_dir and epoch_tag for tariff loading
+    output_dir_path = Path(output_dir) if output_dir else None
     annual_summary = compute_annual_summary(
         dispatch_long,
         reserve_frac=reserve_frac_val,
         dt_h=dt_h,
         unserved_penalty_nzd_per_MWh=unserved_penalty_rate,
-        reserve_penalty_nzd_per_MWh=reserve_penalty_rate
+        reserve_penalty_nzd_per_MWh=reserve_penalty_rate,
+        output_dir=output_dir_path,
+        epoch_tag=epoch_label
     )
     
     # Validate summary schema (self-test)
     _debug_validate_summary_schema(annual_summary)
+    
+    # Regression guard: EB electricity costing validation (before saving/printing)
+    # Check that EB units with fuel consumption have non-zero fuel cost
+    if 'unit_id' in annual_summary.columns:
+        eb_rows = annual_summary[annual_summary['unit_id'].str.upper().str.startswith('EB', na=False)]
+        if len(eb_rows) > 0:
+            # Sum fuel consumption and cost for all EB units (treat NaN as 0)
+            eb_fuel_mwh = eb_rows['annual_fuel_MWh'].fillna(0.0).astype(float).sum()
+            eb_fuel_cost = eb_rows['annual_fuel_cost_nzd'].fillna(0.0).astype(float).sum()
+            
+            if eb_fuel_mwh > 0 and eb_fuel_cost <= 0:
+                warn_msg = (
+                    f"[WARN] EB electricity use detected (annual_fuel_MWh={eb_fuel_mwh:.2f}), "
+                    f"but annual_fuel_cost_nzd is zero ({eb_fuel_cost:.2f}). "
+                    f"Tariff application failed or missing."
+                )
+                print(warn_msg)
+                
+                # Fail fast in validate-only mode
+                if args.validate_only:
+                    raise ValueError(
+                        f"Validation failed: {warn_msg} "
+                        f"Run without --validate-only to continue with warning only."
+                    )
     
     # Save summary CSV (epoch-tagged)
     if args.mode == 'proportional':
@@ -3714,6 +4294,14 @@ def main():
     # Assert unit_id column exists before saving
     assert 'unit_id' in annual_summary.columns, "unit_id column missing before CSV write"
     annual_summary.to_csv(summary_path, index=False)
+    
+    # Self-test: validate electricity effective columns when EB units are present
+    if args.self_test or os.environ.get("DISPATCH_SELF_TEST", "0") == "1":
+        _self_test_electricity_effective(annual_summary, util_df, epoch_label)
+    
+    # Self-test: validate electricity effective columns when EB units are present
+    if args.self_test or os.environ.get("DISPATCH_SELF_TEST", "0") == "1":
+        _self_test_electricity_effective(annual_summary, util_df, epoch_label)
     
     # Self-check: verify TOTAL row cost closure
     if args.mode == 'optimal_subset' and 'TOTAL' in annual_summary['unit_id'].values:
@@ -3782,8 +4370,22 @@ def main():
         unit_meta = util_meta.get(unit_id)
         if unit_meta is not None:
             unit_fuel = unit_meta.get('fuel', '')
-            if 'electricity' in str(unit_fuel).lower():
-                print(f"    (includes electricity ToU cost from electricity_signals CSV)")
+            unit_id_str = str(unit_id).upper()
+            is_eb = ('electricity' in str(unit_fuel).lower() or 
+                     unit_id_str.startswith('EB') or
+                     str(unit_meta.get('tech_type', '')).lower().strip() == 'electrode_boiler')
+            if is_eb:
+                # Determine tariff source from electricity_tariff_source or check if ToU was used
+                if electricity_tariff_source == 'ToU':
+                    print(f"    (electricity tariff: ToU series)")
+                elif electricity_tariff_source == 'flat':
+                    elec_price_flat = signals.get('elec_price_flat_nzd_per_MWh', None)
+                    if elec_price_flat is not None:
+                        print(f"    (electricity tariff: flat from signals_config: {elec_price_flat} NZD/MWh)")
+                    else:
+                        print(f"    (electricity tariff: flat from signals_config)")
+                else:
+                    print(f"    (electricity tariff: default 150.0 NZD/MWh)")
         print(f"  Annual carbon cost (NZD):    {row['annual_carbon_cost_nzd']:12,.2f}")
         print(f"  Annual total cost (NZD):     {row['annual_total_cost_nzd']:12,.2f}")
         print(f"  Avg cost per MWh_heat (NZD): {row['avg_cost_nzd_per_MWh_heat']:10.2f}")
@@ -4405,6 +5007,109 @@ def _self_test_penalty_consistency(annual_summary: pd.DataFrame, args) -> None:
             print(f"[Self-Test OK] No unserved energy, penalty cost is {unserved_cost:.2f} NZD (expected 0.0)")
     else:
         print("[Self-Test SKIP] unserved_penalty_nzd_per_MWh not available in args")
+
+
+def _self_test_electricity_effective(summary: pd.DataFrame, util_df: pd.DataFrame, epoch_label: str) -> None:
+    """
+    Self-test: validate electricity effective columns when EB units are present.
+    
+    Asserts that annual_electricity_MWh_effective > 0 and avg_electricity_tariff_nzd_per_MWh_effective > 0
+    when EB units are present in the summary.
+    
+    Args:
+        summary: Annual summary DataFrame
+        util_df: Utilities DataFrame
+        epoch_label: Epoch label (e.g., '2035_EB')
+    """
+    print("\n" + "=" * 80)
+    print("SELF-TEST: Electricity Effective Columns")
+    print("=" * 80)
+    
+    # Check if EB units are present
+    eb_units_in_util = util_df[
+        (util_df['fuel'].str.lower().str.strip().isin(['electricity', 'elec', 'grid', 'electrode', 'eb'])) |
+        (util_df['unit_id'].str.upper().str.startswith('EB', na=False))
+    ]
+    
+    if len(eb_units_in_util) == 0:
+        print("[SKIP] No EB units found in utilities, skipping electricity effective test")
+        return
+    
+    # Check if EB units appear in summary
+    if 'unit_id' not in summary.columns:
+        print("[FAIL] unit_id column missing in summary")
+        return
+    
+    eb_rows = summary[summary['unit_id'].str.upper().str.startswith('EB', na=False)]
+    if len(eb_rows) == 0:
+        print("[SKIP] No EB units found in summary (may be filtered out), skipping test")
+        return
+    
+    # Check TOTAL row
+    total_row = summary[summary['unit_id'] == 'TOTAL']
+    if len(total_row) == 0:
+        print("[FAIL] TOTAL row not found in summary")
+        return
+    
+    total_row = total_row.iloc[0]
+    
+    # Check effective columns exist
+    required_cols = [
+        'annual_electricity_MWh_effective',
+        'annual_electricity_cost_nzd_effective',
+        'avg_electricity_tariff_nzd_per_MWh_effective'
+    ]
+    
+    missing_cols = [col for col in required_cols if col not in total_row.index]
+    if missing_cols:
+        print(f"[FAIL] Missing required columns: {missing_cols}")
+        return
+    
+    # Extract values
+    elec_mwh_eff = total_row.get('annual_electricity_MWh_effective', 0.0)
+    elec_cost_eff = total_row.get('annual_electricity_cost_nzd_effective', 0.0)
+    elec_tariff_eff = total_row.get('avg_electricity_tariff_nzd_per_MWh_effective', 0.0)
+    
+    # Convert to float, handling NaN
+    try:
+        elec_mwh_eff = float(elec_mwh_eff) if not pd.isna(elec_mwh_eff) else 0.0
+        elec_cost_eff = float(elec_cost_eff) if not pd.isna(elec_cost_eff) else 0.0
+        elec_tariff_eff = float(elec_tariff_eff) if not pd.isna(elec_tariff_eff) else 0.0
+    except (ValueError, TypeError):
+        print(f"[FAIL] Non-numeric values in effective columns")
+        return
+    
+    # Assertions
+    all_passed = True
+    
+    if elec_mwh_eff <= 0:
+        print(f"[FAIL] annual_electricity_MWh_effective = {elec_mwh_eff:.2f} (expected > 0 when EB units present)")
+        all_passed = False
+    else:
+        print(f"[PASS] annual_electricity_MWh_effective = {elec_mwh_eff:.2f} MWh")
+    
+    if elec_tariff_eff <= 0:
+        print(f"[FAIL] avg_electricity_tariff_nzd_per_MWh_effective = {elec_tariff_eff:.2f} (expected > 0 when EB units present)")
+        all_passed = False
+    else:
+        print(f"[PASS] avg_electricity_tariff_nzd_per_MWh_effective = {elec_tariff_eff:.2f} NZD/MWh")
+    
+    if elec_cost_eff <= 0:
+        print(f"[FAIL] annual_electricity_cost_nzd_effective = {elec_cost_eff:.2f} (expected > 0 when EB units present)")
+        all_passed = False
+    else:
+        print(f"[PASS] annual_electricity_cost_nzd_effective = {elec_cost_eff:.2f} NZD")
+    
+    if all_passed:
+        print("\n[OK] All electricity effective column tests passed")
+    else:
+        print("\n[FAIL] Some electricity effective column tests failed")
+        if epoch_label == '2035_EB':
+            raise AssertionError(
+                f"Self-test failed for {epoch_label}: electricity effective columns should be > 0 when EB units are present"
+            )
+    
+    print("=" * 80 + "\n")
 
 
 def _debug_validate_summary_schema(summary: pd.DataFrame) -> None:

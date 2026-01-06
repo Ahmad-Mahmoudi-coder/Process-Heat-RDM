@@ -126,3 +126,75 @@ def resolve_cfg_path(cfg_path: Union[str, Path], p: Union[str, Path]) -> Path:
     
     # None exist: return the "best guess" (Input root) for error reporting
     return candidate2
+
+
+def canonical_output_path(bundle: str, epoch_tag: str = None, layer: str = None, 
+                          runid: str = None, filename: str = None, 
+                          output_root: str = "Output") -> Path:
+    """
+    Generate canonical output paths following the standard folder structure.
+    
+    Structure: Output/runs/<bundle>/epoch<epoch_tag>/<layer>/<runid>/<filename>
+    
+    Args:
+        bundle: Bundle name (e.g., "poc_20260105_115401")
+        epoch_tag: Epoch tag (e.g., "2020", "2035_EB") - optional for bundle-level paths
+        layer: Layer name ("demandpack", "dispatch", "regional_electricity") - optional
+        runid: Run ID (e.g., "dispatch_prop_v2_capfix1") - optional
+        filename: Filename (e.g., "site_dispatch_2035_EB_summary.csv") - optional
+        output_root: Output root directory (default: "Output")
+        
+    Returns:
+        Path object for the canonical location
+        
+    Examples:
+        >>> canonical_output_path("poc_20260105_115401", "2035_EB", "dispatch", "dispatch_prop_v2_capfix1", "site_dispatch_2035_EB_summary.csv")
+        Path("Output/runs/poc_20260105_115401/epoch2035_EB/dispatch/dispatch_prop_v2_capfix1/site_dispatch_2035_EB_summary.csv")
+        
+        >>> canonical_output_path("poc_20260105_115401", filename="kpi_table_capfix1.csv")
+        Path("Output/runs/poc_20260105_115401/kpi_table_capfix1.csv")
+    """
+    root = repo_root()
+    base_path = root / output_root / "runs" / bundle
+    
+    if epoch_tag:
+        base_path = base_path / f"epoch{epoch_tag}"
+    
+    if layer:
+        base_path = base_path / layer
+    
+    if runid:
+        base_path = base_path / runid
+    
+    if filename:
+        return base_path / filename
+    
+    return base_path
+
+
+def ensure_canonical_path(source_path: Path, canonical_path: Path) -> None:
+    """
+    Ensure a file exists at the canonical path, creating a copy if needed.
+    
+    This is a compatibility shim to support existing code that writes to non-canonical
+    locations. It copies the file to the canonical location if it doesn't already exist.
+    
+    Args:
+        source_path: Path where file currently exists (may be non-canonical)
+        canonical_path: Canonical path where file should exist
+    """
+    if canonical_path.exists():
+        return  # Already exists at canonical location
+    
+    if source_path.exists():
+        # Create parent directory if needed
+        canonical_path.parent.mkdir(parents=True, exist_ok=True)
+        # Copy file
+        import shutil
+        shutil.copy2(source_path, canonical_path)
+        print(f"[COMPAT] Copied {source_path} to canonical location: {canonical_path}")
+    else:
+        # Source doesn't exist, create empty file at canonical location for structure
+        canonical_path.parent.mkdir(parents=True, exist_ok=True)
+        canonical_path.touch()
+        print(f"[COMPAT] Created placeholder at canonical location: {canonical_path} (source not found: {source_path})")

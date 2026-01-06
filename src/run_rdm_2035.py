@@ -74,17 +74,41 @@ def find_incremental_csv(bundle_dir: PathlibPath, epoch_tag: str, run_id: str, o
     )
 
 
-def validate_paired_futures(eb_summary_path: PathlibPath, bb_summary_path: PathlibPath) -> bool:
+def validate_paired_futures(eb_summary_path: PathlibPath, bb_summary_path: PathlibPath, 
+                            current_epoch: Optional[str] = None) -> bool:
     """
     Self-test: validate that EB and BB use identical future_id sets (paired futures).
+    
+    Uses appropriate log levels for two-step workflow:
+    - INFO if other summary doesn't exist yet (expected in first step)
+    - WARN if summaries exist but don't match (likely other pathway on older futures)
+    - PASS if futures match
     
     Args:
         eb_summary_path: Path to EB RDM summary CSV
         bb_summary_path: Path to BB RDM summary CSV
+        current_epoch: Current epoch being run ('2035_EB' or '2035_BB'), used for clearer messaging
         
     Returns:
         True if futures are paired, False otherwise
     """
+    # Check if both files exist
+    eb_exists = eb_summary_path.exists()
+    bb_exists = bb_summary_path.exists()
+    
+    if not eb_exists and not bb_exists:
+        # Neither exists - shouldn't happen, but handle gracefully
+        return False
+    
+    if not eb_exists:
+        print(f"[TEST INFO] Pairing check deferred: EB summary not found yet ({eb_summary_path.name}). Run EB epoch to complete pairing.")
+        return False
+    
+    if not bb_exists:
+        print(f"[TEST INFO] Pairing check deferred: BB summary not found yet ({bb_summary_path.name}). Run BB epoch to complete pairing.")
+        return False
+    
+    # Both exist - check pairing
     eb_df = pd.read_csv(eb_summary_path)
     bb_df = pd.read_csv(bb_summary_path)
     
@@ -92,11 +116,19 @@ def validate_paired_futures(eb_summary_path: PathlibPath, bb_summary_path: Pathl
     bb_futures = set(bb_df['future_id'].unique())
     
     if eb_futures != bb_futures:
-        print(f"[TEST FAIL] Future ID mismatch: EB has {len(eb_futures)} futures, BB has {len(bb_futures)} futures")
-        print(f"[TEST FAIL] EB futures: {sorted(eb_futures)[:10]}...")
-        print(f"[TEST FAIL] BB futures: {sorted(bb_futures)[:10]}...")
+        # Mismatch - use WARN (not FAIL) as this is likely due to other pathway being outdated
+        eb_count = len(eb_futures)
+        bb_count = len(bb_futures)
+        eb_min, eb_max = min(eb_futures), max(eb_futures) if eb_futures else (None, None)
+        bb_min, bb_max = min(bb_futures), max(bb_futures) if bb_futures else (None, None)
+        
+        print(f"[TEST WARN] Pairing check not yet satisfied (likely other pathway still on older futures).")
+        print(f"  EB: {eb_count} futures (IDs {eb_min}..{eb_max}) in {eb_summary_path.name}")
+        print(f"  BB: {bb_count} futures (IDs {bb_min}..{bb_max}) in {bb_summary_path.name}")
+        print(f"  Run the other epoch (and ensure same futures CSV) to complete pairing.")
         return False
     
+    # Match - success
     print(f"[TEST PASS] Paired futures validated: {len(eb_futures)} futures match between EB and BB")
     return True
 
@@ -111,20 +143,28 @@ def create_comparison_summary(eb_summary_path: PathlibPath, bb_summary_path: Pat
         bb_summary_path: Path to BB RDM summary CSV
         output_path: Path to write comparison CSV
     """
+    # Check if both files exist
+    if not eb_summary_path.exists():
+        print(f"[WARN] Cannot create comparison: EB summary not found ({eb_summary_path.name})")
+        return
+    
+    if not bb_summary_path.exists():
+        print(f"[WARN] Cannot create comparison: BB summary not found ({bb_summary_path.name})")
+        return
+    
     eb_df = pd.read_csv(eb_summary_path)
     bb_df = pd.read_csv(bb_summary_path)
     
-    # Validate paired futures
-    validate_paired_futures(eb_summary_path, bb_summary_path)
+    # Validate paired futures (with improved logging)
+    is_paired = validate_paired_futures(eb_summary_path, bb_summary_path)
     
     # Ensure both have same future_id set
     eb_futures = set(eb_df['future_id'].unique())
     bb_futures = set(bb_df['future_id'].unique())
     
     if eb_futures != bb_futures:
-        print(f"[WARN] Future ID mismatch: EB has {len(eb_futures)} futures, BB has {len(bb_futures)} futures")
         common_futures = eb_futures & bb_futures
-        print(f"[WARN] Using {len(common_futures)} common futures")
+        print(f"[WARN] Future ID mismatch: using {len(common_futures)} common futures (EB: {len(eb_futures)}, BB: {len(bb_futures)})")
         eb_df = eb_df[eb_df['future_id'].isin(common_futures)]
         bb_df = bb_df[bb_df['future_id'].isin(common_futures)]
     
@@ -292,11 +332,10 @@ def main():
         else:
             print(f"[INFO] Comparison not created: missing summaries (EB: {eb_summary.exists()}, BB: {bb_summary.exists()})")
     
-    # Self-test: validate paired futures if both summaries exist
+    # Self-test: validate paired futures (always check, with appropriate log level)
     eb_summary = rdm_dir / 'rdm_summary_2035_EB.csv'
     bb_summary = rdm_dir / 'rdm_summary_2035_BB.csv'
-    if eb_summary.exists() and bb_summary.exists():
-        validate_paired_futures(eb_summary, bb_summary)
+    validate_paired_futures(eb_summary, bb_summary, current_epoch=args.epoch_tag)
 
 
 if __name__ == '__main__':

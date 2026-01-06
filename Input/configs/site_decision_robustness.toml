@@ -1,0 +1,66 @@
+# Site Decision Robustness Configuration (Canonical)
+# PoC v2 reporting overlay: stylised uncertainty multipliers for site costs
+# Location: Input/configs/site_decision_robustness.toml
+
+[multipliers]
+# Multiplier ranges for site cost perturbation
+# These are stylised uncertainty multipliers used for demonstration and calibration
+# Purpose: make site decision robustness non-trivial while keeping one-pass coupling intact
+
+[multipliers.P_elec_mult]
+# Electricity price multiplier
+distribution = "triangular"  # Options: "uniform", "triangular", "normal"
+range = [0.65, 1.35]  # [min, max]
+mode = 1.0  # For triangular distribution (peak)
+description = "Electricity price multiplier (NZD/MWh scaling)"
+
+[multipliers.P_biomass_mult]
+# Biomass fuel price multiplier / scarcity proxy
+distribution = "triangular"
+range = [0.90, 2.50]  # Skew high to represent scarcity
+mode = 1.2  # Peak slightly above baseline
+description = "Biomass fuel price multiplier (scarcity proxy)"
+
+[multipliers.ETS_mult]
+# Carbon price (ETS) multiplier
+distribution = "triangular"
+range = [0.80, 2.00]
+mode = 1.0
+description = "Carbon price (ETS) multiplier"
+
+[multipliers.D_heat_mult]
+# Heat demand multiplier (placeholder - not applied in PoC v2 unless explicitly enabled)
+distribution = "triangular"
+range = [0.95, 1.10]
+mode = 1.0
+description = "Heat demand multiplier (placeholder only - does not re-run dispatch)"
+
+[generation]
+# Multiplier generation settings
+seed = 42  # Random seed for reproducibility
+force_overwrite = false  # If true, overwrite existing multiplier columns
+
+[satisficing]
+# Satisficing thresholds for robustness evaluation
+shed_fraction_max = 0.0  # No shedding allowed
+upgrade_cost_nzd_max = 7000000.0  # Maximum upgrade cost (7M NZD)
+emissions_enabled = false  # Whether to check emissions threshold
+emissions_tonnes_max = 0.0  # Maximum emissions threshold (only used if enabled)
+
+[cost_composition]
+# Cost decomposition rules
+# These are used to break down annual_total_cost_nzd into components
+# for per-future perturbation
+
+# Electricity cost: prefer annual_electricity_cost_nzd_total
+# Fallback chain: annual_electricity_cost_nzd_total -> annual_electricity_cost_nzd_effective -> 
+#                  annual_electricity_cost_nzd_derived -> annual_electricity_cost_nzd
+
+# Biomass cost proxy: max(annual_fuel_cost_nzd - annual_electricity_cost_nzd_total, 0)
+# (Conservative approach given current summary structure)
+
+# Carbon cost: annual_carbon_cost_nzd
+
+# Other cost: max(annual_total_cost_nzd - annual_fuel_cost_nzd - annual_carbon_cost_nzd, 0)
+# (Should be near 0 but don't assume)
+

@@ -432,6 +432,129 @@ python -m src.run_rdm_2035 --bundle <bundle> --run-id <runid> --epoch-tag 2035_B
 
 **Note:** The matrix files are automatically generated whenever RDM screening is run. They provide the full strategy-by-future evaluation needed for detailed robustness analysis, while the summary files (`rdm_summary_*.csv`) contain only the S_AUTO (benchmark) results.
 
+### Site Decision Robustness Consolidation (PoC v2)
+
+**Path Template:** `Output/runs/<bundle>/rdm/site_decision_robustness_2035_EB_vs_BB.csv`
+
+**Generation Command (PowerShell - Copy-Paste Ready):**
+```powershell
+# Set bundle name
+$bundle = "poc_20260105_release02"
+
+# Step 1: Initialize canonical futures.csv and site multipliers (first time only)
+python -m src.site_decision_robustness --bundle $bundle --init-futures-multipliers
+
+# Step 2: Validate setup (check files, schema, paired futures, multiplier status)
+python -m src.site_decision_robustness --bundle $bundle --validate-only
+
+# Step 3: Generate robustness consolidation
+python -m src.site_decision_robustness --bundle $bundle --epoch-eb 2035_EB --epoch-bb 2035_BB
+
+# Optional: Force regenerate multipliers (uses seed from config for reproducibility)
+python -m src.site_decision_robustness --bundle $bundle --init-futures-multipliers --force-init
+```
+
+**Purpose:** PoC v2 reporting overlay that consolidates site dispatch costs with RDM upgrade costs to evaluate robustness of EB vs BB pathway decisions under uncertainty. Introduces stylised uncertainty multipliers for site costs to make site decision robustness non-trivial while keeping one-pass coupling intact.
+
+**Key Concept:** This is a **post-processing overlay only**. It does NOT re-run dispatch, modify existing artefacts, introduce feedback loops, or change the pipeline order. It reads existing outputs and applies per-future multipliers to perturb site-side cost components.
+
+**Key Columns (Per-Future Table):**
+- `future_id`: Future ID (paired with RDM summaries)
+- **Baseline fields:**
+  - `EB_site_cost_nzd`, `BB_site_cost_nzd`: Original annual_total_cost_nzd from dispatch
+  - `EB_rdm_cost_nzd`, `BB_rdm_cost_nzd`: RDM upgrade + shed costs
+  - `EB_system_cost_nzd`, `BB_system_cost_nzd`: Baseline composite (site + RDM)
+- **Multipliers:**
+  - `P_elec_mult`: Electricity price multiplier
+  - `P_biomass_mult`: Biomass fuel price multiplier / scarcity proxy
+  - `ETS_mult`: Carbon price (ETS) multiplier
+- **Future-costed fields:**
+  - `EB_site_cost_future_nzd`, `BB_site_cost_future_nzd`: Site costs with multipliers applied
+  - `EB_system_cost_future_nzd`, `BB_system_cost_future_nzd`: Future-costed system costs
+  - `winner_system_cost_future`: Winner pathway ("EB" or "BB")
+  - `regret_EB_future_nzd`, `regret_BB_future_nzd`: Regret vs winner
+- **Interpretability deltas:**
+  - `delta_site_cost_future_nzd`: EB - BB site cost difference
+  - `delta_upgrade_cost_nzd`: EB - BB upgrade cost difference
+  - `delta_system_cost_future_nzd`: EB - BB system cost difference
+- **Other fields:** Upgrade names, capacities, shed fractions, shed MWh, CO2 emissions, electricity consumption
+
+**Summary Metrics CSV:**
+**Path Template:** `Output/runs/<bundle>/rdm/site_decision_robustness_summary_2035.csv`
+
+**Key Metrics:**
+- `n_futures`: Number of futures evaluated
+- `win_rate_EB_system_cost_future`: Percentage of futures where EB wins (lower future-costed system cost)
+- `mean_regret_EB_nzd`, `p95_regret_EB_nzd`, `max_regret_EB_nzd`: Regret statistics for EB
+- `mean_regret_BB_nzd`, `p95_regret_BB_nzd`, `max_regret_BB_nzd`: Regret statistics for BB
+- `upgrade_exposure_EB_P150`, `upgrade_exposure_BB_P150`: Share of futures with selected_capacity_MW >= 150
+- `satisficing_rate_EB`, `satisficing_rate_BB`: Share of futures satisfying thresholds (shed_fraction <= 0, upgrade_cost <= 7M NZD)
+
+**Figures:**
+- `site_decision_regret_cdf_2035.png`: Regret CDF comparison (EB vs BB) using future-costed regrets
+- `site_decision_system_cost_boxplot_2035.png`: System cost distribution comparison (EB vs BB)
+
+**Canonical Futures CSV (with Site Multipliers):**
+**Path Template:** `Output/runs/<bundle>/rdm/futures.csv`
+
+**Purpose:** Canonical per-bundle futures file containing both grid multipliers (from template) and site multipliers (generated). Ensures paired futures are consistent across EB and BB pathways.
+
+**Creation:** Created from template `Input/rdm/futures_2035.csv` on first run with `--init-futures-multipliers`. Site multiplier columns are then added using configured distributions and ranges.
+
+**Schema:**
+- `future_id`: Future ID (integer, must exactly match RDM summaries)
+- **Grid multipliers (from template):**
+  - `U_headroom_mult`: Headroom multiplier
+  - `U_inc_mult`: Incremental demand multiplier
+  - `U_upgrade_capex_mult`: Upgrade capex multiplier
+  - `U_voll`: Value of lost load (NZD/MWh)
+  - `U_consents_uplift`: Consents uplift multiplier
+- **Site multipliers (generated):**
+  - `P_elec_mult`: Electricity price multiplier (default range: [0.65, 1.35], triangular, mode=1.0)
+  - `P_biomass_mult`: Biomass fuel price multiplier / scarcity proxy (default range: [0.90, 2.50], triangular, mode=1.2)
+  - `ETS_mult`: Carbon price (ETS) multiplier (default range: [0.80, 2.00], triangular, mode=1.0)
+  - `D_heat_mult`: Heat demand multiplier (placeholder only; default 1.0; not applied in PoC v2)
+
+**Configuration:**
+**Path:** `Input/configs/site_decision_robustness.toml` (canonical)
+- Fallback search order: `Input/configs/site_decision_robustness.toml` → `configs/site_decision_robustness_min.toml` → `configs/site_decision_robustness.toml`
+
+**Key Settings:**
+- Multiplier ranges and distributions (triangular, uniform, or normal)
+- Random seed for multiplier generation (default: 42, for reproducibility)
+- Satisficing thresholds (shed_fraction_max, upgrade_cost_nzd_max, emissions_enabled, emissions_tonnes_max)
+
+**Thesis Use:** Robustness evaluation showing how site decision (EB vs BB) performs under stylised uncertainty in site economics. Enables non-trivial robustness analysis while maintaining one-pass coupling. The multipliers are stylised uncertainty multipliers used for demonstration and calibration - they represent plausible ranges for electricity prices, biomass scarcity, and carbon prices that could affect the relative competitiveness of EB vs BB pathways.
+
+**Futures Count and Pairing Contract:**
+
+For EB vs BB comparison, the same `future_id` set must exist in:
+- `rdm_summary_2035_EB.csv`
+- `rdm_summary_2035_BB.csv`
+- `Output/runs/<bundle>/rdm/futures.csv` (canonical per bundle)
+
+The overlay module enforces this by filtering canonical `futures.csv` to the `future_id`s present in both RDM summaries.
+
+**Recommended Thesis PoC Settings:**
+- **Grid RDM:** 100 futures (expensive part - regional screening)
+- **Overlay:** Uses the same 100 paired futures (cheap part - site cost perturbation)
+
+**Note:** You may keep a larger *template* (e.g., 200 rows) in `Input/rdm/futures_2035.csv` for later scaling, but only those futures present in the RDM summaries will be used. The overlay automatically filters to the paired subset.
+
+**How to Scale from 21 → 100 Futures:**
+1. Expand `Input/rdm/futures_2035.csv` to 100 rows (`future_id` 0..99) with grid multipliers (U_headroom_mult, U_inc_mult, etc.)
+2. Re-run EB and BB grid RDM so both summaries contain those 100 `future_id`s
+3. Re-run overlay: `--init-futures-multipliers` → `--validate-only` → generate overlay
+
+**Critical Requirements:**
+- RDM summaries for EB and BB must use identical `future_id` sets (paired futures)
+- Canonical futures CSV must contain at least all RDM future_ids (can have more, but only paired subset is used)
+- If multiplier columns are missing, they default to 1.0 (degenerate robustness)
+- Old outputs are archived to `_archive_overlays/YYYYMMDD_HHMMSS/` before replacement
+
+**Windows File Locking (Troubleshooting):**
+On Windows, if CSV outputs are open in Excel/preview, writes may fail. The module now uses atomic writes with retries (5 attempts with backoff delays). If it still fails, the error message will indicate which file is locked - close it and re-run.
+
 ## Bundle-Level Artefacts
 
 ### KPI Table CSV
@@ -472,20 +595,37 @@ python -m src.compare_pathways_2035 --bundle <bundle> --eb-run epoch2035_EB/disp
 
 ## Input Artefacts
 
-### Futures CSV
+### Futures CSV Template
 **Path:** `Input/rdm/futures_2035.csv`
 
-**Purpose:** Uncertainty futures with multipliers for paired EB/BB evaluation.
+**Purpose:** Template for creating canonical per-bundle futures CSV. Contains grid uncertainty multipliers for paired EB/BB evaluation.
 
 **Key Columns:**
-- `future_id`: Unique future identifier
-- `U_headroom_mult`: Headroom multiplier
-- `U_inc_mult`: Incremental demand multiplier
-- `U_upgrade_capex_mult`: Upgrade capex multiplier
-- `U_voll`: Value of lost load (NZD/MWh)
-- `U_consents_uplift`: Consents uplift multiplier
+- `future_id`: Unique future identifier (integer, 0-99 for 100 futures recommended, or 0-199 for 200 futures)
+- `U_headroom_mult`: Headroom multiplier (triangular: a=0.75, mode=0.90, b=1.00)
+- `U_inc_mult`: Incremental demand multiplier (triangular: a=0.85, mode=1.00, b=1.15)
+- `U_upgrade_capex_mult`: Upgrade capex multiplier (triangular: a=0.80, mode=1.00, b=1.50)
+- `U_voll`: Value of lost load (NZD/MWh, discrete: {5000, 10000, 15000, 20000} with weights [0.10, 0.40, 0.35, 0.15])
+- `U_consents_uplift`: Consents uplift multiplier (triangular: a=1.00, mode=1.20, b=1.60)
 
-**Thesis Use:** Uncertainty specification for robustness analysis.
+**Anchor Futures:** The first 21 futures (future_id 0-20) are preserved exactly as the original PoC set for regression testing and interpretability. These anchors remain bit-for-bit identical across all generations.
+
+**Generation:** Use `scripts/generate_futures_2035.py` to expand from 21 to 100 or 200 futures:
+```powershell
+# Generate 100 futures (recommended for thesis PoC)
+python scripts/generate_futures_2035.py --n 100 --seed 42 --out "Input/rdm/futures_2035.csv"
+
+# Validate
+python scripts/validate_futures_2035.py --csv "Input/rdm/futures_2035.csv" --n 100
+```
+
+**100 Futures Recommended; 200 Optional:**
+- **100 futures:** Recommended for thesis PoC. Provides good coverage of uncertainty space while keeping computational cost manageable.
+- **200 futures:** Optional for extended analysis. Use when deeper uncertainty exploration is needed.
+
+**Usage:** This template is copied to `Output/runs/<bundle>/rdm/futures.csv` (canonical futures) on first initialization. Site multiplier columns (P_elec_mult, P_biomass_mult, ETS_mult) are then added to the canonical futures file.
+
+**Thesis Use:** Base uncertainty specification for robustness analysis. The canonical futures.csv per bundle extends this with site-side multipliers for site decision robustness evaluation. Both EB and BB grid RDM must use the same `Input/rdm/futures_2035.csv` template to ensure paired futures contract.
 
 ### Upgrade Menu TOML
 **Path:** `Input/configs/grid_upgrades_southland_edendale.toml`
@@ -523,3 +663,18 @@ scripts/run_poc_layers.ps1 -Bundle <bundle> -Layers thesis_pack
 ```
 
 **Thesis Use:** Final curated outputs for thesis chapters.
+
+---
+
+## Acceptance Checklist (Site Decision Robustness Overlay)
+
+After implementing the site decision robustness overlay, verify:
+
+- [ ] `--validate-only` passes with clear output showing futures count and multiplier status
+- [ ] Overlay generation succeeds with closed files (no Excel/preview open)
+- [ ] Expected failure message when files are locked: "File appears locked (Excel/preview). Close it and retry: <path>"
+- [ ] Canonical futures.csv is created from template on first `--init-futures-multipliers` run
+- [ ] Multipliers are reproducible (same seed produces same values)
+- [ ] Outputs are archived before replacement (check `_archive_overlays/` folder)
+- [ ] CLI output shows: "Canonical futures rows: <n_total>, using paired futures from RDM: <n_used>"
+- [ ] Running module twice consecutively does not crash (even if files were previously open)

@@ -88,6 +88,139 @@ Output/runs/<bundle>/
 
 Contains a thesis-ready paragraph summarizing key deltas (cost, electricity, emissions).
 
+## PoC v2 Reporting Overlay: Site Decision Robustness
+
+**Location:** `Output/runs/<bundle>/rdm/site_decision_robustness_*.csv`
+
+**Purpose:** Consolidates site dispatch costs with RDM upgrade costs to evaluate robustness of EB vs BB pathway decisions under uncertainty. Introduces stylised uncertainty multipliers for site costs to make site decision robustness non-trivial while keeping one-pass coupling intact.
+
+**Key Concept:** This is a **post-processing overlay only**. It does NOT:
+- Re-run dispatch
+- Modify existing artefacts
+- Introduce feedback loops
+- Change the pipeline order
+
+**What it does:**
+- Reads existing dispatch summaries and RDM summaries
+- Creates canonical per-bundle futures.csv from template (Input/rdm/futures_2035.csv)
+- Generates site-side multipliers (P_elec_mult, P_biomass_mult, ETS_mult) on top of existing grid multipliers
+- Applies per-future multipliers to perturb site-side cost components (electricity price, biomass price, carbon price)
+- Computes future-costed system costs (site + RDM) for each future
+- Evaluates robustness metrics (win rates, regret distributions, satisficing rates)
+
+**Canonical Futures CSV:** `Output/runs/<bundle>/rdm/futures.csv`
+- Created from template: `Input/rdm/futures_2035.csv` (contains grid multipliers: U_headroom_mult, U_inc_mult, etc.)
+- Site multiplier columns added: `P_elec_mult`, `P_biomass_mult`, `ETS_mult`, `D_heat_mult`
+- Must contain exactly the same `future_id` values as RDM summaries (paired futures)
+- Multiplier columns can be initialized automatically using `--init-futures-multipliers`
+
+**Multipliers:**
+- `P_elec_mult`: Electricity price multiplier (default range: [0.65, 1.35], triangular distribution)
+- `P_biomass_mult`: Biomass fuel price multiplier / scarcity proxy (default range: [0.90, 2.50], triangular, mode=1.2)
+- `ETS_mult`: Carbon price (ETS) multiplier (default range: [0.80, 2.00], triangular distribution)
+- `D_heat_mult`: Heat demand multiplier (placeholder only; default 1.0; not applied in PoC v2)
+
+**Configuration:** `Input/configs/site_decision_robustness.toml` (canonical)
+- Fallback search order: `Input/configs/site_decision_robustness.toml` → `configs/site_decision_robustness_min.toml` → `configs/site_decision_robustness.toml`
+- Defines multiplier ranges, distributions, satisficing thresholds
+- Uses reproducible random seed (default: 42) for multiplier generation
+
+**Generation Workflow:**
+```powershell
+# Step 1: Initialize canonical futures.csv and site multipliers (first time only)
+python -m src.site_decision_robustness --bundle poc_20260105_release02 --init-futures-multipliers
+
+# Step 2: Validate setup (check files, schema, paired futures)
+python -m src.site_decision_robustness --bundle poc_20260105_release02 --validate-only
+
+# Step 3: Generate robustness consolidation
+python -m src.site_decision_robustness --bundle poc_20260105_release02 --epoch-eb 2035_EB --epoch-bb 2035_BB
+```
+
+**Outputs:**
+- `site_decision_robustness_2035_EB_vs_BB.csv`: Per-future joined table with baseline and future-costed system costs
+- `site_decision_robustness_summary_2035.csv`: Summary metrics (win rates, regret stats, satisficing rates)
+- `site_decision_regret_cdf_2035.png`: Regret CDF comparison figure (future-costed)
+- `site_decision_system_cost_boxplot_2035.png`: System cost distribution comparison (future-costed)
+
+**Archiving:** Old overlay outputs are archived to `Output/runs/<bundle>/_archive_overlays/YYYYMMDD_HHMMSS/` before replacement.
+
+**Futures Count and Pairing Contract:**
+
+For EB vs BB comparison, the same `future_id` set must exist in:
+- `rdm_summary_2035_EB.csv`
+- `rdm_summary_2035_BB.csv`
+- `Output/runs/<bundle>/rdm/futures.csv` (canonical per bundle)
+
+The overlay module enforces this by filtering canonical `futures.csv` to the `future_id`s present in both RDM summaries.
+
+**Recommended Thesis PoC Settings:**
+- **Grid RDM:** 100 futures (expensive part - regional screening)
+- **Overlay:** Uses the same 100 paired futures (cheap part - site cost perturbation)
+
+**Note:** You may keep a larger *template* (e.g., 200 rows) in `Input/rdm/futures_2035.csv` for later scaling, but only those futures present in the RDM summaries will be used. The overlay automatically filters to the paired subset.
+
+**How to Scale from 21 → 100 Futures:**
+1. Expand `Input/rdm/futures_2035.csv` to 100 rows (`future_id` 0..99) with grid multipliers (U_headroom_mult, U_inc_mult, etc.)
+2. Re-run EB and BB grid RDM so both summaries contain those 100 `future_id`s
+3. Re-run overlay: `--init-futures-multipliers` → `--validate-only` → generate overlay
+
+**Thesis Use:** Robustness evaluation showing how site decision (EB vs BB) performs under stylised uncertainty in site economics. Enables non-trivial robustness analysis while maintaining one-pass coupling. The multipliers are stylised uncertainty multipliers used for demonstration and calibration - they represent plausible ranges for electricity prices, biomass scarcity, and carbon prices that could affect the relative competitiveness of EB vs BB pathways.
+
+**Windows File Locking (Troubleshooting):**
+On Windows, if CSV outputs are open in Excel/preview, writes may fail. The module now uses atomic writes with retries; if it still fails after 5 attempts, close the file and re-run. The error message will indicate which file is locked.
+
+### Generate 100/200 Grid Futures (2035)
+
+**Purpose:** Expand the base 21 futures to 100 (recommended) or 200 (extended analysis) for more robust grid RDM evaluation while preserving the original 21 anchor futures for regression testing and interpretability.
+
+**Why Keep 21 Anchors:**
+- Regression testing: Ensures existing results remain reproducible
+- Interpretability: Provides a stable reference set for comparison
+- Backward compatibility: Existing analyses using futures 0-20 remain valid
+
+**Generation Workflow (PowerShell - Copy-Paste Ready):**
+```powershell
+# Step 1: Generate 100 futures (recommended for thesis PoC)
+python scripts/generate_futures_2035.py --n 100 --seed 42 --out "Input/rdm/futures_2035.csv"
+
+# Step 2: Validate the generated futures
+python scripts/validate_futures_2035.py --csv "Input/rdm/futures_2035.csv" --n 100
+
+# Step 3: Update RDM experiment configs to match n_futures
+# Edit Input/configs/rdm_experiment_2035_EB.toml: set n_futures = 100
+# Edit Input/configs/rdm_experiment_2035_BB.toml: set n_futures = 100
+
+# Step 4: Re-run grid RDM for EB and BB (both must use same futures template)
+# This ensures paired futures contract: both summaries contain future_id 0..99
+python -m src.run_rdm_2035 --bundle <bundle> --epoch-tag 2035_EB --futures-csv "Input/rdm/futures_2035.csv" ...
+python -m src.run_rdm_2035 --bundle <bundle> --epoch-tag 2035_BB --futures-csv "Input/rdm/futures_2035.csv" ...
+
+# Step 5: Run overlay (uses canonical futures.csv created from template)
+python -m src.site_decision_robustness --bundle <bundle> --init-futures-multipliers
+python -m src.site_decision_robustness --bundle <bundle> --validate-only
+python -m src.site_decision_robustness --bundle <bundle> --epoch-eb 2035_EB --epoch-bb 2035_BB
+```
+
+**For 200 Futures (Extended Analysis):**
+```powershell
+# Generate 200 futures
+python scripts/generate_futures_2035.py --n 200 --seed 42 --out "Input/rdm/futures_2035.csv"
+
+# Validate
+python scripts/validate_futures_2035.py --csv "Input/rdm/futures_2035.csv" --n 200
+
+# Update configs: set n_futures = 200 in both EB and BB configs
+# Re-run grid RDM for both pathways
+# Re-run overlay
+```
+
+**Important Notes:**
+- The generator preserves futures 0-20 exactly (bit-for-bit identical)
+- New futures (21-99 or 21-199) use Latin Hypercube Sampling (LHS) for continuous variables and weighted discrete sampling for U_voll
+- Both EB and BB must use the same `Input/rdm/futures_2035.csv` template to ensure paired futures
+- The overlay module automatically filters canonical futures.csv to the future_ids present in RDM summaries
+
 ### RDM Summaries
 
 **Location:** `Output/runs/<bundle>/rdm/rdm_summary_<epoch_tag>.csv`

@@ -8,7 +8,7 @@ name = "rdm_2035_EB_grid_upgrade"
 epoch_tag = "2035_EB"
 description = "RDM over grid upgrade choices for Edendale 2035 electrification (EB variant)."
 sampling = "lhs"          # lhs | sobol | random
-n_futures = 200           # increase later if needed (e.g., 500–2000)
+n_futures = 100           # recommended for thesis PoC; use 200 for extended analysis
 seed = 42
 dt_h = 1.0                # must match your time series (8760*1h)
 

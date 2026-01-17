@@ -7,7 +7,7 @@ name = "rdm_2035_BB_grid_upgrade"
 epoch_tag = "2035_BB"
 description = "RDM over grid upgrade choices for Edendale 2035 (BB variant) to contrast grid pressure vs EB."
 sampling = "lhs"
-n_futures = 200
+n_futures = 100           # recommended for thesis PoC; use 200 for extended analysis
 seed = 43
 dt_h = 1.0
 

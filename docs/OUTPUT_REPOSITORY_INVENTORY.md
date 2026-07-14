@@ -167,9 +167,7 @@ Columns: `relative_path`, `file_size_bytes`, `sha256`, `extension`, `top_level_o
 
 This inventory documents the Output snapshot added in commit:
 
-**`Add complete historical Output directory`**
-
-(Update this line with the actual commit hash after push.)
+**`aef13457996680f3ccaf7f741307558ecf932231`**
 
 ## Clone instructions (second laptop)
 

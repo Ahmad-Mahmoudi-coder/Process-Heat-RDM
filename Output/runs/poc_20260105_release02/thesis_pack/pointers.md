@@ -1,0 +1,115 @@
+﻿# Thesis Pack Pointers
+
+This document maps curated thesis outputs to their source paths.
+
+## Tables
+
+- compare_pathways_2035_EB_vs_BB.csv -> Output\runs\poc_20260105_release02\compare_pathways_2035_EB_vs_BB.csv
+- gxp_capacity_MW_2020.csv -> Output\runs\poc_20260105_release02\epoch2020\regional_signals\dispatch_prop_v2_capfix1\signals\gxp_capacity_MW_2020.csv
+- gxp_capacity_MW_2025.csv -> Output\runs\poc_20260105_release02\epoch2025\regional_signals\dispatch_prop_v2_capfix1\signals\gxp_capacity_MW_2025.csv
+- gxp_capacity_MW_2028.csv -> Output\runs\poc_20260105_release02\epoch2028\regional_signals\dispatch_prop_v2_capfix1\signals\gxp_capacity_MW_2028.csv
+- gxp_capacity_MW_2035_BB.csv -> Output\runs\poc_20260105_release02\epoch2035_BB\regional_signals\dispatch_prop_v2_capfix1\signals\gxp_capacity_MW_2035_BB.csv
+- gxp_capacity_MW_2035_EB.csv -> Output\runs\poc_20260105_release02\epoch2035_EB\regional_signals\dispatch_prop_v2_capfix1\signals\gxp_capacity_MW_2035_EB.csv
+- headroom_MW_2020.csv -> Output\runs\poc_20260105_release02\epoch2020\regional_signals\dispatch_prop_v2_capfix1\signals\headroom_MW_2020.csv
+- headroom_MW_2025.csv -> Output\runs\poc_20260105_release02\epoch2025\regional_signals\dispatch_prop_v2_capfix1\signals\headroom_MW_2025.csv
+- headroom_MW_2028.csv -> Output\runs\poc_20260105_release02\epoch2028\regional_signals\dispatch_prop_v2_capfix1\signals\headroom_MW_2028.csv
+- headroom_MW_2035_BB.csv -> Output\runs\poc_20260105_release02\epoch2035_BB\regional_signals\dispatch_prop_v2_capfix1\signals\headroom_MW_2035_BB.csv
+- headroom_MW_2035_EB.csv -> Output\runs\poc_20260105_release02\epoch2035_EB\regional_signals\dispatch_prop_v2_capfix1\signals\headroom_MW_2035_EB.csv
+- kpi_table_dispatch_prop_v2_capfix1.csv -> Output\runs\poc_20260105_release02\kpi_table_dispatch_prop_v2_capfix1.csv
+- rdm_compare_2035_EB_vs_BB.csv -> Output\runs\poc_20260105_release02\rdm\rdm_compare_2035_EB_vs_BB.csv
+- rdm_matrix_2035_BB.csv -> Output\runs\poc_20260105_release02\rdm\rdm_matrix_2035_BB.csv
+- rdm_matrix_2035_EB.csv -> Output\runs\poc_20260105_release02\rdm\rdm_matrix_2035_EB.csv
+- rdm_summary_2035_BB.csv -> Output\runs\poc_20260105_release02\rdm\rdm_summary_2035_BB.csv
+- rdm_summary_2035_EB.csv -> Output\runs\poc_20260105_release02\rdm\rdm_summary_2035_EB.csv
+- site_dispatch_2020_summary.csv -> Output\runs\poc_20260105_release02\epoch2020\dispatch\dispatch_prop_v2_capfix1\site_dispatch_2020_summary.csv
+- site_dispatch_2025_summary.csv -> Output\runs\poc_20260105_release02\epoch2025\dispatch\dispatch_prop_v2_capfix1\site_dispatch_2025_summary.csv
+- site_dispatch_2028_summary.csv -> Output\runs\poc_20260105_release02\epoch2028\dispatch\dispatch_prop_v2_capfix1\site_dispatch_2028_summary.csv
+- site_dispatch_2035_BB_summary.csv -> Output\runs\poc_20260105_release02\epoch2035_BB\dispatch\dispatch_prop_v2_capfix1\site_dispatch_2035_BB_summary.csv
+- site_dispatch_2035_EB_summary.csv -> Output\runs\poc_20260105_release02\epoch2035_EB\dispatch\dispatch_prop_v2_capfix1\site_dispatch_2035_EB_summary.csv
+- tariff_nzd_per_MWh_2020.csv -> Output\runs\poc_20260105_release02\epoch2020\regional_signals\dispatch_prop_v2_capfix1\signals\tariff_nzd_per_MWh_2020.csv
+- tariff_nzd_per_MWh_2025.csv -> Output\runs\poc_20260105_release02\epoch2025\regional_signals\dispatch_prop_v2_capfix1\signals\tariff_nzd_per_MWh_2025.csv
+- tariff_nzd_per_MWh_2028.csv -> Output\runs\poc_20260105_release02\epoch2028\regional_signals\dispatch_prop_v2_capfix1\signals\tariff_nzd_per_MWh_2028.csv
+- tariff_nzd_per_MWh_2035_BB.csv -> Output\runs\poc_20260105_release02\epoch2035_BB\regional_signals\dispatch_prop_v2_capfix1\signals\tariff_nzd_per_MWh_2035_BB.csv
+- tariff_nzd_per_MWh_2035_EB.csv -> Output\runs\poc_20260105_release02\epoch2035_EB\regional_signals\dispatch_prop_v2_capfix1\signals\tariff_nzd_per_MWh_2035_EB.csv
+
+- site_decision_regret_cdf_2035.png -> C:\Model\Edendale Fonterra Site\Output\runs\poc_20260105_release02\thesis_pack\figures\site_decision_regret_cdf_2035.png
+- site_decision_robustness_summary_2035.csv -> C:\Model\Edendale Fonterra Site\Output\runs\poc_20260105_release02\rdm\site_decision_robustness_summary_2035.csv
+- site_decision_robustness_2035_EB_vs_2035_BB.csv -> C:\Model\Edendale Fonterra Site\Output\runs\poc_20260105_release02\rdm\site_decision_robustness_2035_EB_vs_2035_BB.csv
+## Figures
+- site_decision_system_cost_boxplot_2035.png -> C:\Model\Edendale Fonterra Site\Output\runs\poc_20260105_release02\thesis_pack\figures\site_decision_system_cost_boxplot_2035.png
+- site_decision_regret_cdf_2035.png -> C:\Model\Edendale Fonterra Site\Output\runs\poc_20260105_release02\thesis_pack\figures\site_decision_regret_cdf_2035.png
+
+- demand_2020_daily_profile_seasonal.png -> Output\runs\poc_20260105_release02\epoch2020_daily_profile\demandpack\figures\demand_2020_daily_profile_seasonal.png
+- demand_2020_duration_curve.png -> Output\runs\poc_20260105_release02\epoch2020_duration\demandpack\figures\demand_2020_duration_curve.png
+- demand_2020_monthly_energy.png -> Output\runs\poc_20260105_release02\epoch2020_monthly\demandpack\figures\demand_2020_monthly_energy.png
+- demand_2020_timeseries_week.png -> Output\runs\poc_20260105_release02\epoch2020_timeseries\demandpack\figures\demand_2020_timeseries_week.png
+- demand_2025_daily_profile_seasonal.png -> Output\runs\poc_20260105_release02\epoch2025_daily_profile\demandpack\figures\demand_2025_daily_profile_seasonal.png
+- demand_2025_duration_curve.png -> Output\runs\poc_20260105_release02\epoch2025_duration\demandpack\figures\demand_2025_duration_curve.png
+- demand_2025_monthly_energy.png -> Output\runs\poc_20260105_release02\epoch2025_monthly\demandpack\figures\demand_2025_monthly_energy.png
+- demand_2025_timeseries_week.png -> Output\runs\poc_20260105_release02\epoch2025_timeseries\demandpack\figures\demand_2025_timeseries_week.png
+- demand_2028_daily_profile_seasonal.png -> Output\runs\poc_20260105_release02\epoch2028_daily_profile\demandpack\figures\demand_2028_daily_profile_seasonal.png
+- demand_2028_duration_curve.png -> Output\runs\poc_20260105_release02\epoch2028_duration\demandpack\figures\demand_2028_duration_curve.png
+- demand_2028_monthly_energy.png -> Output\runs\poc_20260105_release02\epoch2028_monthly\demandpack\figures\demand_2028_monthly_energy.png
+- demand_2028_timeseries_week.png -> Output\runs\poc_20260105_release02\epoch2028_timeseries\demandpack\figures\demand_2028_timeseries_week.png
+- demand_2035_BB_daily_profile_seasonal.png -> Output\runs\poc_20260105_release02\epoch2035_BB_daily_profile\demandpack\figures\demand_2035_BB_daily_profile_seasonal.png
+- demand_2035_BB_duration_curve.png -> Output\runs\poc_20260105_release02\epoch2035_BB_duration\demandpack\figures\demand_2035_BB_duration_curve.png
+- demand_2035_BB_monthly_energy.png -> Output\runs\poc_20260105_release02\epoch2035_BB_monthly\demandpack\figures\demand_2035_BB_monthly_energy.png
+- demand_2035_BB_timeseries_week.png -> Output\runs\poc_20260105_release02\epoch2035_BB_timeseries\demandpack\figures\demand_2035_BB_timeseries_week.png
+- demand_2035_EB_daily_profile_seasonal.png -> Output\runs\poc_20260105_release02\epoch2035_EB_daily_profile\demandpack\figures\demand_2035_EB_daily_profile_seasonal.png
+- demand_2035_EB_duration_curve.png -> Output\runs\poc_20260105_release02\epoch2035_EB_duration\demandpack\figures\demand_2035_EB_duration_curve.png
+- demand_2035_EB_monthly_energy.png -> Output\runs\poc_20260105_release02\epoch2035_EB_monthly\demandpack\figures\demand_2035_EB_monthly_energy.png
+- demand_2035_EB_timeseries_week.png -> Output\runs\poc_20260105_release02\epoch2035_EB_timeseries\demandpack\figures\demand_2035_EB_timeseries_week.png
+- headroom_daily_envelope_2020.png -> Output\runs\poc_20260105_release02\epoch2020\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_daily_envelope_2020.png
+- headroom_daily_envelope_2025.png -> Output\runs\poc_20260105_release02\epoch2025\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_daily_envelope_2025.png
+- headroom_daily_envelope_2028.png -> Output\runs\poc_20260105_release02\epoch2028\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_daily_envelope_2028.png
+- headroom_daily_envelope_2035_BB.png -> Output\runs\poc_20260105_release02\epochBB\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_daily_envelope_2035_BB.png
+- headroom_daily_envelope_2035_EB.png -> Output\runs\poc_20260105_release02\epochEB\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_daily_envelope_2035_EB.png
+- headroom_duration_curve_2020.png -> Output\runs\poc_20260105_release02\epoch2020\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_duration_curve_2020.png
+- headroom_duration_curve_2025.png -> Output\runs\poc_20260105_release02\epoch2025\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_duration_curve_2025.png
+- headroom_duration_curve_2028.png -> Output\runs\poc_20260105_release02\epoch2028\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_duration_curve_2028.png
+- headroom_duration_curve_2035_BB.png -> Output\runs\poc_20260105_release02\epochBB\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_duration_curve_2035_BB.png
+- headroom_duration_curve_2035_EB.png -> Output\runs\poc_20260105_release02\epochEB\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_duration_curve_2035_EB.png
+- headroom_timeseries_week_2020.png -> Output\runs\poc_20260105_release02\epoch2020\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_timeseries_week_2020.png
+- headroom_timeseries_week_2025.png -> Output\runs\poc_20260105_release02\epoch2025\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_timeseries_week_2025.png
+- headroom_timeseries_week_2028.png -> Output\runs\poc_20260105_release02\epoch2028\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_timeseries_week_2028.png
+- headroom_timeseries_week_2035_BB.png -> Output\runs\poc_20260105_release02\epochBB\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_timeseries_week_2035_BB.png
+- headroom_timeseries_week_2035_EB.png -> Output\runs\poc_20260105_release02\epochEB\regional_signals\dispatch_prop_v2_capfix1\figures\headroom_timeseries_week_2035_EB.png
+- heat_2020_unit_stack.png -> Output\runs\poc_20260105_release02\epoch2020\dispatch\dispatch_prop_v2_capfix1\figures\heat_2020_unit_stack.png
+- heat_2020_unit_utilisation_duration_prop.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\heat_2020_unit_utilisation_duration_prop.png
+- heat_2020_units_online_prop.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\heat_2020_units_online_prop.png
+- heat_2025_unit_stack.png -> Output\runs\poc_20260105_release02\epoch2025\dispatch\dispatch_prop_v2_capfix1\figures\heat_2025_unit_stack.png
+- heat_2025_unit_utilisation_duration_prop.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\heat_2025_unit_utilisation_duration_prop.png
+- heat_2025_units_online_prop.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\heat_2025_units_online_prop.png
+- heat_2028_unit_stack.png -> Output\runs\poc_20260105_release02\epoch2028\dispatch\dispatch_prop_v2_capfix1\figures\heat_2028_unit_stack.png
+- heat_2028_unit_utilisation_duration_prop.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\heat_2028_unit_utilisation_duration_prop.png
+- heat_2028_units_online_prop.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\heat_2028_units_online_prop.png
+- heat_2035_BB_unit_stack.png -> Output\runs\poc_20260105_release02\epoch2035_BB\dispatch\dispatch_prop_v2_capfix1\figures\heat_2035_BB_unit_stack.png
+- heat_2035_BB_unit_utilisation_duration_prop.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\heat_2035_BB_unit_utilisation_duration_prop.png
+- heat_2035_BB_units_online_prop.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\heat_2035_BB_units_online_prop.png
+- heat_2035_EB_unit_stack.png -> Output\runs\poc_20260105_release02\epoch2035_EB\dispatch\dispatch_prop_v2_capfix1\figures\heat_2035_EB_unit_stack.png
+- heat_2035_EB_unit_utilisation_duration_prop.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\heat_2035_EB_unit_utilisation_duration_prop.png
+- heat_2035_EB_units_online_prop.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\heat_2035_EB_units_online_prop.png
+- incremental_electricity_vs_headroom_week_2025.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\incremental_electricity_vs_headroom_week_2025.png
+- incremental_electricity_vs_headroom_week_2028.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\incremental_electricity_vs_headroom_week_2028.png
+- incremental_electricity_vs_headroom_week_2035_BB.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\incremental_electricity_vs_headroom_week_2035_BB.png
+- incremental_electricity_vs_headroom_week_2035_EB.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\incremental_electricity_vs_headroom_week_2035_EB.png
+- rdm_2035_compare_failure_rate_bar.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\rdm_2035_compare_failure_rate_bar.png
+- rdm_2035_compare_regret_cdf.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\rdm_2035_compare_regret_cdf.png
+- rdm_2035_compare_regret_cdf_logx.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\rdm_2035_compare_regret_cdf_logx.png
+- rdm_2035_compare_shed_fraction_hist.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\rdm_2035_compare_shed_fraction_hist.png
+- rdm_2035_compare_total_cost_boxplot.png -> Output\runs\poc_20260105_release02\thesis_pack\figures\rdm_2035_compare_total_cost_boxplot.png
+- tariff_daily_envelope_2020.png -> Output\runs\poc_20260105_release02\epoch2020\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_daily_envelope_2020.png
+- tariff_daily_envelope_2025.png -> Output\runs\poc_20260105_release02\epoch2025\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_daily_envelope_2025.png
+- tariff_daily_envelope_2028.png -> Output\runs\poc_20260105_release02\epoch2028\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_daily_envelope_2028.png
+- tariff_daily_envelope_2035_BB.png -> Output\runs\poc_20260105_release02\epochBB\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_daily_envelope_2035_BB.png
+- tariff_daily_envelope_2035_EB.png -> Output\runs\poc_20260105_release02\epochEB\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_daily_envelope_2035_EB.png
+- tariff_duration_curve_2020.png -> Output\runs\poc_20260105_release02\epoch2020\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_duration_curve_2020.png
+- tariff_duration_curve_2025.png -> Output\runs\poc_20260105_release02\epoch2025\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_duration_curve_2025.png
+- tariff_duration_curve_2028.png -> Output\runs\poc_20260105_release02\epoch2028\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_duration_curve_2028.png
+- tariff_duration_curve_2035_BB.png -> Output\runs\poc_20260105_release02\epochBB\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_duration_curve_2035_BB.png
+- tariff_duration_curve_2035_EB.png -> Output\runs\poc_20260105_release02\epochEB\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_duration_curve_2035_EB.png
+- tariff_timeseries_week_2020.png -> Output\runs\poc_20260105_release02\epoch2020\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_timeseries_week_2020.png
+- tariff_timeseries_week_2025.png -> Output\runs\poc_20260105_release02\epoch2025\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_timeseries_week_2025.png
+- tariff_timeseries_week_2028.png -> Output\runs\poc_20260105_release02\epoch2028\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_timeseries_week_2028.png
+- tariff_timeseries_week_2035_BB.png -> Output\runs\poc_20260105_release02\epochBB\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_timeseries_week_2035_BB.png
+- tariff_timeseries_week_2035_EB.png -> Output\runs\poc_20260105_release02\epochEB\regional_signals\dispatch_prop_v2_capfix1\figures\tariff_timeseries_week_2035_EB.png

@@ -1,0 +1,10 @@
+{
+  "config_path": "C:\\Model\\Edendale Fonterra Site\\Input\\configs\\rdm_experiment_2035_BB.toml",
+  "experiment_name": "rdm_2035_BB_grid_upgrade",
+  "epoch_tag": "2035_BB",
+  "bundle": "TEST_unserved_fix",
+  "headroom_csv": "C:\\Model\\Edendale GXP\\outputs_latest\\gxp_hourly_2035.csv",
+  "incremental_csv": "C:\\Model\\Edendale Fonterra Site\\Output\\runs\\TEST_unserved_fix\\epoch2035_BB\\dispatch_prop_v2\\signals\\incremental_electricity_MW_2035_BB.csv",
+  "upgrade_toml": "C:\\Model\\Edendale Fonterra Site\\Input\\configs\\grid_upgrades_southland_edendale.toml",
+  "timestamp_utc": "2025-12-27T10:06:57.097994+00:00"
+}

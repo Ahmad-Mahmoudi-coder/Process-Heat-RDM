@@ -1,0 +1,11 @@
+{
+  "batch_run_id": "TEST_gxp_consumer_v3",
+  "created_at": "2026-01-03T20:21:45.995167",
+  "epochs": [
+    2035
+  ],
+  "variants_2035": [
+    "EB",
+    "BB"
+  ]
+}

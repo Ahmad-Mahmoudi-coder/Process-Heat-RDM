@@ -1,0 +1,2 @@
+n_futures,win_rate_EB_system_cost_future,mean_regret_EB_nzd,p95_regret_EB_nzd,max_regret_EB_nzd,mean_regret_BB_nzd,p95_regret_BB_nzd,max_regret_BB_nzd,upgrade_exposure_EB_P150,upgrade_exposure_BB_P150,satisficing_rate_EB,satisficing_rate_BB
+100,7.000000000000001,8796798.175503878,17076655.39407456,18930135.165285528,101232.53762963519,291433.5590029128,4493007.630894721,49.0,0.0,35.0,88.0

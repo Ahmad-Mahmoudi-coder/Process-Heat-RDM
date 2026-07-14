@@ -27,11 +27,8 @@ ENV/
 env/
 .conda/
 
-# Output directories
-Output/
-**/Output/*.csv
-**/Output/*.png
-**/Output/*.json
+# Output directory — full historical outputs are tracked in Git.
+# (No ignore rules apply to Output/; all runs, archives, and artefacts are included.)
 
 # IDE
 .vscode/
@@ -56,6 +53,7 @@ desktop.ini
 
 # Project specific
 *.log
+!Output/**/*.log
 *.tmp
 temp/
 tmp/

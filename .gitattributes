@@ -17,3 +17,15 @@
 *.xlsx binary
 *.pptx binary
 *.docx binary
+
+# Git LFS for large Output artefacts (size/extension policy)
+Output/**/*.parquet filter=lfs diff=lfs merge=lfs -text
+Output/**/*.feather filter=lfs diff=lfs merge=lfs -text
+Output/**/*.h5 filter=lfs diff=lfs merge=lfs -text
+Output/**/*.hdf5 filter=lfs diff=lfs merge=lfs -text
+Output/**/*.xlsx filter=lfs diff=lfs merge=lfs -text
+Output/**/*.xlsm filter=lfs diff=lfs merge=lfs -text
+Output/**/*.zip filter=lfs diff=lfs merge=lfs -text
+Output/**/*.7z filter=lfs diff=lfs merge=lfs -text
+Output/**/*.tif filter=lfs diff=lfs merge=lfs -text
+Output/**/*.tiff filter=lfs diff=lfs merge=lfs -text

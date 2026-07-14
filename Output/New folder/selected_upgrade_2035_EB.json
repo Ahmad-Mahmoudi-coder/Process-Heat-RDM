@@ -1,0 +1,30 @@
+{
+  "selected_upgrade": {
+    "name": "fonterra_opt3_N_plus97MW",
+    "capacity_MW": 97.0,
+    "capex_nzd": 55900000.0,
+    "annualised_cost_nzd": 5241263.57879352,
+    "lead_time_months": 48,
+    "security_level": "N"
+  },
+  "assumptions": {
+    "real_discount_rate": 0.07,
+    "asset_life_years": 40,
+    "consents_uplift_factor": 1.25,
+    "CRF": 0.07500913887361031
+  },
+  "results": {
+    "annual_shed_MWh": 34471.495878011076,
+    "annual_shed_cost_nzd": 344714958.7801108,
+    "total_cost_nzd": 349956222.3589043,
+    "dt_h": 1.0
+  },
+  "metadata": {
+    "epoch_tag": "2035_EB",
+    "headroom_csv_path": "C:\\Model\\Edendale GXP\\outputs_latest\\gxp_hourly_2035.csv",
+    "incremental_csv_path": "C:\\Model\\Edendale Fonterra Site\\Output\\runs\\TEST_unserved_fix\\epoch2035_EB\\dispatch_prop_v2\\signals\\incremental_electricity_MW_2035_EB.csv",
+    "upgrade_toml_path": "Input\\configs\\grid_upgrades_southland_edendale.toml",
+    "voll_nzd_per_MWh": 10000.0,
+    "note": "PoC assumption: upgrades available instantly upon selection; lead_time_months retained for reporting/planning extensions."
+  }
+}

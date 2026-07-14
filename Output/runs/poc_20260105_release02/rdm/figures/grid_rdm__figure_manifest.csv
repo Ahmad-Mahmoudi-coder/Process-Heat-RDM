@@ -1,0 +1,24 @@
+figure_file,epoch,data_source_csv,primary_message,suggested_caption
+grid_rdm_2035_EB__total_cost_boxplot.png,2035_EB,rdm_matrix,Total cost distribution across strategies,Distribution of total cost (NZD) by strategy for 2035_EB
+grid_rdm_2035_EB__annual_shed_MWh_boxplot.png,2035_EB,rdm_matrix,Annual shedding distribution across strategies,Distribution of annual shedding (MWh) by strategy for 2035_EB
+grid_rdm_2035_EB__shed_fraction_boxplot.png,2035_EB,rdm_matrix,Shed fraction distribution across strategies,Distribution of shed fraction by strategy for 2035_EB
+grid_rdm_2035_EB__binding_hours_boxplot.png,2035_EB,rdm_matrix,Binding hours (headroom stress) across strategies,Distribution of binding hours by strategy for 2035_EB
+grid_rdm_2035_EB__upgrade_choice_frequency.png,2035_EB,rdm_matrix,Upgrade choice frequency by strategy,Frequency of upgrade choices by strategy for 2035_EB
+grid_rdm_2035_EB__tradeoff_cost_vs_shed_scatter.png,2035_EB,rdm_matrix,Cost vs shedding trade-off by strategy,Cost vs shedding trade-off scatter by strategy for 2035_EB
+grid_rdm_2035_EB__auto_headroom_vs_selected_capacity.png,2035_EB,rdm_matrix,Headroom multiplier vs selected capacity relationship,Relationship between headroom multiplier and selected capacity (AUTO) for 2035_EB
+grid_rdm_2035_EB__auto_increment_vs_binding_hours.png,2035_EB,rdm_matrix,Binding hours (headroom stress) across strategies,Distribution of binding hours by strategy for 2035_EB
+grid_rdm_2035_EB__auto_shed_heatmap_headroom_vs_increment.png,2035_EB,rdm_matrix,Vulnerability heatmap: headroom vs increment drivers,Mean annual shedding heatmap by headroom and incremental multipliers (AUTO) for 2035_EB
+grid_rdm_2035_BB__total_cost_boxplot.png,2035_BB,rdm_matrix,Total cost distribution across strategies,Distribution of total cost (NZD) by strategy for 2035_BB
+grid_rdm_2035_BB__annual_shed_MWh_boxplot.png,2035_BB,rdm_matrix,Annual shedding distribution across strategies,Distribution of annual shedding (MWh) by strategy for 2035_BB
+grid_rdm_2035_BB__shed_fraction_boxplot.png,2035_BB,rdm_matrix,Shed fraction distribution across strategies,Distribution of shed fraction by strategy for 2035_BB
+grid_rdm_2035_BB__binding_hours_boxplot.png,2035_BB,rdm_matrix,Binding hours (headroom stress) across strategies,Distribution of binding hours by strategy for 2035_BB
+grid_rdm_2035_BB__upgrade_choice_frequency.png,2035_BB,rdm_matrix,Upgrade choice frequency by strategy,Frequency of upgrade choices by strategy for 2035_BB
+grid_rdm_2035_BB__tradeoff_cost_vs_shed_scatter.png,2035_BB,rdm_matrix,Cost vs shedding trade-off by strategy,Cost vs shedding trade-off scatter by strategy for 2035_BB
+grid_rdm_2035_BB__auto_headroom_vs_selected_capacity.png,2035_BB,rdm_matrix,Headroom multiplier vs selected capacity relationship,Relationship between headroom multiplier and selected capacity (AUTO) for 2035_BB
+grid_rdm_2035_BB__auto_increment_vs_binding_hours.png,2035_BB,rdm_matrix,Binding hours (headroom stress) across strategies,Distribution of binding hours by strategy for 2035_BB
+grid_rdm_2035_BB__auto_shed_heatmap_headroom_vs_increment.png,2035_BB,rdm_matrix,Vulnerability heatmap: headroom vs increment drivers,Mean annual shedding heatmap by headroom and incremental multipliers (AUTO) for 2035_BB
+grid_rdm_EB_vs_BB__total_cost_scatter.png,EB_vs_BB,rdm_compare,Total cost distribution across strategies,Distribution of total cost (NZD) by strategy for EB_vs_BB
+grid_rdm_EB_vs_BB__delta_total_cost_hist.png,EB_vs_BB,rdm_compare,Total cost distribution across strategies,Distribution of total cost (NZD) by strategy for EB_vs_BB
+grid_rdm_EB_vs_BB__upgrade_choice_confusion.png,EB_vs_BB,rdm_compare,Upgrade choice agreement between EB and BB,Confusion matrix of upgrade choices between EB and BB pathways
+grid_rdm_EB_vs_BB__annual_shed_scatter.png,EB_vs_BB,rdm_compare,Annual shedding distribution across strategies,Distribution of annual shedding (MWh) by strategy for EB_vs_BB
+grid_rdm_EB_vs_BB__binding_hours_scatter.png,EB_vs_BB,rdm_compare,Binding hours (headroom stress) across strategies,Distribution of binding hours by strategy for EB_vs_BB

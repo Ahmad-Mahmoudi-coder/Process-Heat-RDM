@@ -1,0 +1,7 @@
+unit_id,annual_heat_GWh,annual_fuel_MWh,annual_co2_tonnes,annual_fuel_cost_nzd,annual_carbon_cost_nzd,var_om_cost_nzd,fixed_on_cost_nzd,startup_cost_nzd,annual_total_cost_nzd,annual_operational_cost_nzd,annual_penalty_cost_nzd,annual_system_cost_nzd,avg_cost_nzd_per_MWh_heat,avg_operational_cost_nzd_per_MWh_heat,unserved_MW,unserved_cost_nzd,reserve_shortfall_MW,reserve_penalty_cost_nzd,online_cost_nzd,hours_reserve_shortfall_gt_0,p95_reserve_shortfall_MW,avg_online_units,avg_online_headroom_MW,avg_online_units_peak_season,avg_online_units_low_season
+EB1,88.9056,89803.63636363637,0.0,0.0,0.0,0.0,9072.0,2500.0,11572.0,11572.0,0.0,0.0,0.13016052982039375,0.13016052982039375,0.0,0.0,0.0,0.0,0.0,,,,,,
+EB2,257.544,260145.45454545453,0.0,0.0,0.0,0.0,17520.0,500.0,18020.0,18020.0,0.0,0.0,0.06996862672009443,0.06996862672009443,0.0,0.0,0.0,0.0,0.0,,,,,,
+EB3,257.544,260145.45454545453,0.0,0.0,0.0,0.0,17520.0,500.0,18020.0,18020.0,0.0,0.0,0.06996862672009443,0.06996862672009443,0.0,0.0,0.0,0.0,0.0,,,,,,
+EB4,215.00639999999999,217178.1818181818,0.0,0.0,0.0,0.0,17520.0,500.0,18020.0,18020.0,0.0,0.0,0.08381145863564991,0.08381145863564991,0.0,0.0,0.0,0.0,0.0,,,,,,
+SYSTEM,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,,0.0,0.0,0.0,0.0,0.0,0.0,,,,,,,
+TOTAL,819.0,827272.7272727272,0.0,0.0,0.0,0.0,61632.0,4000.0,1606432.0,1606432.0,0.0,1540800.0,1.9614554334554335,1.9614554334554335,0.0,0.0,0.0,0.0,1540800.0,0.0,0.0,3.5178082191780824,0.0,3.9725274725274726,3.0

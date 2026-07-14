@@ -1,0 +1,204 @@
+{
+  "exclude_benchmark_from_ranking": true,
+  "exclude_auto_from_ranking": true,
+  "benchmark_strategy_id": "S_AUTO",
+  "ranking_strategy_ids": [
+    "S0_NONE",
+    "S1_OPT1",
+    "S2_OPT2",
+    "S3_OPT3",
+    "S4_OPT4"
+  ],
+  "benchmark_strategy_ids": [
+    "S_AUTO"
+  ],
+  "regret_reference_for_ranking": "best_policy",
+  "regret_reference_for_reporting": "benchmark",
+  "quantiles_by_strategy": {
+    "S0_NONE": {
+      "total_cost_nzd": {
+        "p05": 4963857310.375504,
+        "p50": 11239390807.890965,
+        "p95": 12127850365.595606
+      },
+      "annual_shed_MWh": {
+        "p05": 625872.1104447263,
+        "p50": 721611.9250478819,
+        "p95": 792373.1286206632
+      }
+    },
+    "S1_OPT1": {
+      "total_cost_nzd": {
+        "p05": 3677035119.370491,
+        "p50": 8470302676.297337,
+        "p95": 9127707108.697802
+      },
+      "annual_shed_MWh": {
+        "p05": 441912.1104447263,
+        "p50": 537651.925047882,
+        "p95": 608413.1286206633
+      }
+    },
+    "S2_OPT2": {
+      "total_cost_nzd": {
+        "p05": 2991649965.0836415,
+        "p50": 6622767511.451128,
+        "p95": 7686161212.343883
+      },
+      "annual_shed_MWh": {
+        "p05": 345956.656159127,
+        "p50": 441291.925047882,
+        "p95": 512053.12862066325
+      }
+    },
+    "S3_OPT3": {
+      "total_cost_nzd": {
+        "p05": 44932205.349114135,
+        "p50": 672578467.4397538,
+        "p95": 1273591414.0103967
+      },
+      "annual_shed_MWh": {
+        "p05": 6086.954928791663,
+        "p50": 44468.232653424464,
+        "p95": 84319.85101888099
+      }
+    },
+    "S4_OPT4": {
+      "total_cost_nzd": {
+        "p05": 7014132.7733355425,
+        "p50": 11168149.291027945,
+        "p95": 13762581.606285991
+      },
+      "annual_shed_MWh": {
+        "p05": 0.0,
+        "p50": 0.0,
+        "p95": 0.0
+      }
+    },
+    "S_AUTO": {
+      "total_cost_nzd": {
+        "p05": 7014132.7733355425,
+        "p50": 11168149.291027945,
+        "p95": 13762581.606285991
+      },
+      "annual_shed_MWh": {
+        "p05": 0.0,
+        "p50": 0.0,
+        "p95": 0.0
+      }
+    }
+  },
+  "regret_by_strategy": {
+    "S0_NONE": {
+      "max_regret": 12136488074.74238,
+      "p95_regret": 12116386521.868637
+    },
+    "S1_OPT1": {
+      "max_regret": 9278009833.48292,
+      "p95_regret": 9115908832.230206
+    },
+    "S2_OPT2": {
+      "max_regret": 7836258095.584655,
+      "p95_regret": 7674362935.8762865
+    },
+    "S3_OPT3": {
+      "max_regret": 1334959951.7413683,
+      "p95_regret": 1261793137.5428004
+    },
+    "S4_OPT4": {
+      "max_regret": 0.0,
+      "p95_regret": 0.0
+    }
+  },
+  "regret_vs_benchmark_by_strategy": {
+    "S0_NONE": {
+      "max_regret": 12136488074.74238,
+      "p95_regret": 12116386521.868637
+    },
+    "S1_OPT1": {
+      "max_regret": 9278009833.48292,
+      "p95_regret": 9115908832.230206
+    },
+    "S2_OPT2": {
+      "max_regret": 7836258095.584655,
+      "p95_regret": 7674362935.8762865
+    },
+    "S3_OPT3": {
+      "max_regret": 1334959951.7413683,
+      "p95_regret": 1261793137.5428004
+    },
+    "S4_OPT4": {
+      "max_regret": 0.0,
+      "p95_regret": 0.0
+    },
+    "S_AUTO": {
+      "max_regret": 0.0,
+      "p95_regret": 0.0
+    }
+  },
+  "best_strategy_by_minimax_regret": "S4_OPT4",
+  "satisficing_by_strategy": {
+    "S0_NONE": {
+      "pass_rate": 0.0,
+      "n_pass": 0,
+      "n_total": 5
+    },
+    "S1_OPT1": {
+      "pass_rate": 0.0,
+      "n_pass": 0,
+      "n_total": 5
+    },
+    "S2_OPT2": {
+      "pass_rate": 0.0,
+      "n_pass": 0,
+      "n_total": 5
+    },
+    "S3_OPT3": {
+      "pass_rate": 0.0,
+      "n_pass": 0,
+      "n_total": 5
+    },
+    "S4_OPT4": {
+      "pass_rate": 1.0,
+      "n_pass": 5,
+      "n_total": 5
+    },
+    "S_AUTO": {
+      "pass_rate": 1.0,
+      "n_pass": 5,
+      "n_total": 5
+    }
+  },
+  "best_strategy_by_max_satisficing": "S4_OPT4",
+  "failure_rates": {
+    "S0_NONE": 1.0,
+    "S1_OPT1": 1.0,
+    "S2_OPT2": 1.0,
+    "S3_OPT3": 1.0,
+    "S4_OPT4": 0.0,
+    "S_AUTO": 0.0
+  },
+  "best_by_minimax_regret": "S4_OPT4",
+  "best_by_max_satisficing": "S4_OPT4",
+  "strategy_labels": {
+    "S0_NONE": "No upgrade (allow shedding)",
+    "S1_OPT1": "RETA opt1 (+21 MW, N)",
+    "S2_OPT2": "RETA opt2 (+32 MW, N-1)",
+    "S3_OPT3": "RETA opt3 (+97 MW, N)",
+    "S4_OPT4": "PoC extension (+150 MW, beyond RETA)",
+    "S_AUTO": "Auto-select upgrade (min cost)"
+  },
+  "satisficing_thresholds": {
+    "shed_MWh_max": 0.1,
+    "max_exceed_MW_max": 0.01,
+    "shed_fraction_max": 0.0,
+    "p95_exceed_MW_max": null
+  },
+  "experiment_name": "rdm_2035_EB_grid_upgrade",
+  "epoch_tag": "2035_EB",
+  "n_futures": 5,
+  "seed": 42,
+  "dt_h": 1.0,
+  "config_path": "C:\\Model\\Edendale Fonterra Site\\Input\\configs\\rdm_experiment_2035_EB.toml",
+  "timestamp": "2025-12-27T23:08:39.545334"
+}

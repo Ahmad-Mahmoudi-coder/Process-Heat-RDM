@@ -63,7 +63,7 @@ Archive-related directories under `Output/`:
 - `New folder/runs/_archive`
 - `runs/poc_20260105_release02/_archive_overlays`
 
-The `_archive/` tree contains historical PoC bundles (`poc_20260105_115401`, `poc_20260105_release01`), timestamped run snapshots, and intermediate experiment outputs.
+The `_archive/` tree contains historical PoC bundles (`poc_20260105_115401`, `poc_20260105_release01`), timestamped run snapshots, and intermediate experiment outputs. Accidental `New folder*` scratch trees under `Output/` and `Output/_archive/` were removed during Zenodo archival cleanup (2026-08); largest-file rows below that pointed into those trees are historical inventory only.
 
 ## Primary frozen PoC bundle
 
@@ -183,7 +183,7 @@ git lfs pull
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r modules/edendale_gxp/requirements.txt
+pip install -r requirements.txt
 ```
 
-The repository uses a Python virtual environment and the `modules/edendale_gxp/requirements.txt` dependency file. No model rerun is required to access historical outputs after clone.
+The repository uses a Python virtual environment and the root `requirements.txt` dependency file. No model rerun is required to access historical outputs after clone. Headroom for the frozen PoC is generated within-model (not from an external Edendale_GXP SignalsPack).

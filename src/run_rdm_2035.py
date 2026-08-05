@@ -4,8 +4,8 @@ Run RDM 2035
 Runner module for RDM screening of 2035 EB and BB pathways using paired futures.
 
 Usage:
-    python -m src.run_rdm_2035 --bundle poc_20260105_115401 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB
-    python -m src.run_rdm_2035 --bundle poc_20260105_115401 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_BB
+    python -m src.run_rdm_2035 --bundle poc_20260105_release02 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB
+    python -m src.run_rdm_2035 --bundle poc_20260105_release02 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_BB
 """
 
 from __future__ import annotations
@@ -240,7 +240,7 @@ def main():
     parser.add_argument('--output-root', type=str, default='Output',
                        help='Output root directory (default: Output)')
     parser.add_argument('--bundle', type=str, required=True,
-                       help='Bundle name (e.g., poc_20260105_115401)')
+                       help='Bundle name (e.g., poc_20260105_release02)')
     parser.add_argument('--run-id', type=str, required=True,
                        help='Run ID (e.g., dispatch_prop_v2_capfix1)')
     parser.add_argument('--epoch-tag', type=str, required=True,

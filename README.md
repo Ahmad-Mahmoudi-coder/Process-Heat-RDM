@@ -1,31 +1,82 @@
-# Edendale DemandPack PoC
+# Process-Heat-RDM: Proof of Concept for Decision-Centred Modelling (DCM)
 
-This repository contains the synthetic hourly heat demand generator and PoC site model for the Edendale site (site_id 11_031) as part of PhD research on industrial electrification and dispatch modelling.
+This repository is the authoritative proof-of-concept for the methodology paper *Decision-Centred Modelling (DCM): A Governed Modular Architecture for Infrastructure Planning Under Deep Uncertainty*. It demonstrates a site-to-region industrial process-heat decision (electric-boiler vs biomass-boiler pathways) at Fonterra Edendale, Southland, New Zealand, evaluated across 100 paired futures under deep uncertainty. Numerical results are illustrative of the method under declared low-to-medium-maturity scope conditions and are **not** calibrated operational guidance.
 
-The DemandPack generator produces synthetic hourly heat demand profiles for 2020 using annual targets, seasonal factors, weekday patterns, and hourly profiles. The baseline implementation supports minimal but defensible PoC demand generation to support later site dispatch and electrification epochs.
+## Pipeline summary
+
+Five governed stages exchange versioned artefacts:
+
+1. **Demand construction** → `DemandPack` (hourly heat demand by epoch)
+2. **Site dispatch** → site cost/energy outcomes and `SignalsPack` precursors
+3. **Grid interface** → stylised headroom and incremental-electricity interface series (within-model; not from an external GXP submodule)
+4. **Regional screening** → upgrade-menu selection against headroom / VOLL
+5. **Ensemble evaluation** → RDM futures, robustness metrics, and curated thesis pack (`OutlookPack`)
+
+Governed artefacts exchanged across stages include **DemandPack**, **SignalsPack**, **incremental-electricity**, and **OutlookPack**.
+
+## Reproducibility
+
+| Item | Value |
+|------|--------|
+| Python | 3.11+ (tested with 3.11.9) |
+| Dependencies | `pip install -r requirements.txt` |
+| Fixed random seed | `42` (DemandPack noise, RDM / site-decision robustness generation; see `Input/configs/*`) |
+| Authoritative frozen bundle | **`poc_20260105_release02`** |
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+The frozen results that produced the paper’s figures and tables live under `Output/runs/poc_20260105_release02/` and must not be regenerated or overwritten for archival citation. An earlier working bundle, `poc_20260105_115401`, may appear in `_archive/` history; it is **not** the paper bundle.
+
+**Headroom provenance:** the frozen PoC uses a within-model stylised headroom series (`src/generate_regional_signals_poc.py` / `src/gxp_rdm_screen.load_or_generate_headroom`). It does **not** consume data from a separate Edendale_GXP repository or submodule.
+
+## How this repo maps to the paper
+
+| Paper content | Source file |
+|---------------|-------------|
+| Robustness metrics (EB vs BB: satisficing, regret, win rate, upgrade exposure) | `Output/runs/poc_20260105_release02/rdm/site_decision_robustness_summary_2035.csv` |
+| Per-future decomposition (site-side vs grid-interface cost differential) | `Output/runs/poc_20260105_release02/rdm/site_decision_robustness_2035_EB_vs_2035_BB.csv` |
+| Incremental-electricity peaks and epoch summary (133/95 MW) | `Output/runs/poc_20260105_release02/thesis_pack/incremental_electricity_epoch_summary.csv` |
+| Pathway comparison / site costs (EB 91.0m, BB 76.8m) | `Output/runs/poc_20260105_release02/thesis_pack/tables/compare_pathways_2035_EB_vs_BB.csv` |
+| Upgrade menu and costs | `Input/configs/grid_upgrades_southland_edendale.toml` |
+
+## Citation
+
+If you use this work, please cite: [paper citation — DOI to be added]
+
+Machine-readable citation metadata is in [`CITATION.cff`](CITATION.cff). Zenodo deposit metadata is in [`.zenodo.json`](.zenodo.json).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Seyed Ahmad Mahmoudi Lahijani.
+
+---
 
 ## PoC Quickstart
 
-**Canonical bundle example:** `poc_20260105_115401`
+**Authoritative bundle (paper results):** `poc_20260105_release02`
 
 ### Running Dispatch for All Epochs
 
 ```bash
 # Run dispatch for 2025, 2028, 2035_EB, and 2035_BB
-python -m src.site_dispatch_2020 --epoch 2025 --mode proportional --demand-csv Output/runs/poc_20260105_115401/epoch2025/demandpack/demandpack/hourly_heat_demand_2025.csv --output-root Output --run-id poc_20260105_115401/epoch2025/dispatch_prop_v2_capfix1
+python -m src.site_dispatch_2020 --epoch 2025 --mode proportional --demand-csv Output/runs/poc_20260105_release02/epoch2025/demandpack/demandpack/hourly_heat_demand_2025.csv --output-root Output --run-id poc_20260105_release02/epoch2025/dispatch_prop_v2_capfix1
 
-python -m src.site_dispatch_2020 --epoch 2028 --mode proportional --demand-csv Output/runs/poc_20260105_115401/epoch2028/demandpack/demandpack/hourly_heat_demand_2028.csv --output-root Output --run-id poc_20260105_115401/epoch2028/dispatch_prop_v2_capfix1
+python -m src.site_dispatch_2020 --epoch 2028 --mode proportional --demand-csv Output/runs/poc_20260105_release02/epoch2028/demandpack/demandpack/hourly_heat_demand_2028.csv --output-root Output --run-id poc_20260105_release02/epoch2028/dispatch_prop_v2_capfix1
 
-python -m src.site_dispatch_2020 --epoch 2035_EB --mode proportional --demand-csv Output/runs/poc_20260105_115401/epoch2035_EB/demandpack/demandpack/hourly_heat_demand_2035.csv --output-root Output --run-id poc_20260105_115401/epoch2035_EB/dispatch_prop_v2_capfix1
+python -m src.site_dispatch_2020 --epoch 2035_EB --mode proportional --demand-csv Output/runs/poc_20260105_release02/epoch2035_EB/demandpack/demandpack/hourly_heat_demand_2035.csv --output-root Output --run-id poc_20260105_release02/epoch2035_EB/dispatch_prop_v2_capfix1
 
-python -m src.site_dispatch_2020 --epoch 2035_BB --mode proportional --demand-csv Output/runs/poc_20260105_115401/epoch2035_BB/demandpack/demandpack/hourly_heat_demand_2035.csv --output-root Output --run-id poc_20260105_115401/epoch2035_BB/dispatch_prop_v2_capfix1
+python -m src.site_dispatch_2020 --epoch 2035_BB --mode proportional --demand-csv Output/runs/poc_20260105_release02/epoch2035_BB/demandpack/demandpack/hourly_heat_demand_2035.csv --output-root Output --run-id poc_20260105_release02/epoch2035_BB/dispatch_prop_v2_capfix1
 ```
 
 ### Generating KPI Table
 
 ```bash
-# KPI table is produced by the KPI export command (if available)
-# Output location: Output/runs/poc_20260105_115401/kpi_table_capfix1.csv
+# KPI table artefact in the frozen paper bundle:
+# Output/runs/poc_20260105_release02/kpi_table_dispatch_prop_v2_capfix1.csv
 # Note: This file is kept as-is and not modified by the PoC pipeline
 ```
 
@@ -33,43 +84,43 @@ python -m src.site_dispatch_2020 --epoch 2035_BB --mode proportional --demand-cs
 
 ```bash
 # Compare EB vs BB pathways (using default paths)
-python -m src.compare_pathways_2035 --bundle poc_20260105_115401 --output-root Output
+python -m src.compare_pathways_2035 --bundle poc_20260105_release02 --output-root Output
 
 # Or with explicit run paths
-python -m src.compare_pathways_2035 --bundle poc_20260105_115401 --eb-run epoch2035_EB/dispatch_prop_v2_capfix1 --bb-run epoch2035_BB/dispatch_prop_v2_capfix1 --output-root Output
+python -m src.compare_pathways_2035 --bundle poc_20260105_release02 --eb-run epoch2035_EB/dispatch_prop_v2_capfix1 --bb-run epoch2035_BB/dispatch_prop_v2_capfix1 --output-root Output
 ```
 
 This creates:
-- `Output/runs/poc_20260105_115401/compare_pathways_2035_EB_vs_BB.csv`
+- `Output/runs/poc_20260105_release02/compare_pathways_2035_EB_vs_BB.csv`
 
 ### Running RDM Screening
 
 ```bash
 # Run RDM screening for EB pathway
-python -m src.run_rdm_2035 --bundle poc_20260105_115401 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB --output-root Output
+python -m src.run_rdm_2035 --bundle poc_20260105_release02 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB --output-root Output
 
 # Run RDM screening for BB pathway
-python -m src.run_rdm_2035 --bundle poc_20260105_115401 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_BB --output-root Output
+python -m src.run_rdm_2035 --bundle poc_20260105_release02 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_BB --output-root Output
 
 # Create comparison (after both runs)
-python -m src.run_rdm_2035 --bundle poc_20260105_115401 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB --output-root Output --create-comparison
+python -m src.run_rdm_2035 --bundle poc_20260105_release02 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB --output-root Output --create-comparison
 ```
 
 This creates:
-- `Output/runs/poc_20260105_115401/rdm/rdm_summary_2035_EB.csv`
-- `Output/runs/poc_20260105_115401/rdm/rdm_summary_2035_BB.csv`
-- `Output/runs/poc_20260105_115401/rdm/rdm_compare_2035_EB_vs_BB.csv` (if `--create-comparison` is used)
+- `Output/runs/poc_20260105_release02/rdm/rdm_summary_2035_EB.csv`
+- `Output/runs/poc_20260105_release02/rdm/rdm_summary_2035_BB.csv`
+- `Output/runs/poc_20260105_release02/rdm/rdm_compare_2035_EB_vs_BB.csv` (if `--create-comparison` is used)
 
-**Note:** Both EB and BB RDM summaries use the **same paired futures** from `Input/rdm/futures_2035.csv` to ensure fair comparison.
+**Note:** Both EB and BB RDM summaries use the **same paired futures** from `Input/rdm/futures_2035.csv` to ensure fair comparison. Omit `--headroom-csv` to use the within-model stylised headroom series (paper default).
 
 ### Smoke Tests
 
 ```bash
 # Validate that TOTAL rows exist in dispatch summaries
-python -m src.compare_pathways_2035 --bundle poc_20260105_115401 --output-root Output
+python -m src.compare_pathways_2035 --bundle poc_20260105_release02 --output-root Output
 
 # Validate that EB and BB RDM summaries use paired futures (runs automatically after both summaries exist)
-python -m src.run_rdm_2035 --bundle poc_20260105_115401 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB --output-root Output --create-comparison
+python -m src.run_rdm_2035 --bundle poc_20260105_release02 --run-id dispatch_prop_v2_capfix1 --epoch-tag 2035_EB --output-root Output --create-comparison
 ```
 
 ## 2035_BB Pathway Assumptions
@@ -204,7 +255,7 @@ The dispatch model enforces: `heat_MW[u,t] <= max_heat_MW[u] * availability_mult
 
 The regional electricity module (`src/regional_electricity_poc.py`) supports discrete grid capacity upgrade options to minimize total cost (upgrade cost + shed cost).
 
-**Configuration File:** `Input/signals/grid_upgrades.toml`
+**Configuration File:** `Input/signals/grid_upgrades.toml` (PoC screening menu used by the paper path: `Input/configs/grid_upgrades_southland_edendale.toml`)
 
 **Schema:**
 ```toml
@@ -225,17 +276,21 @@ annual_cost_nzd = 90000.0
 ```
 
 **Usage:**
+
+Headroom for the frozen PoC is generated within-model. For optional regional screening against a precomputed headroom CSV from the paper bundle:
+
 ```bash
 # Regional module with upgrade options (auto-discovers grid_upgrades.toml)
+# Use within-model / bundle headroom — not an external Edendale_GXP SignalsPack
 python -m src.regional_electricity_poc --epoch 2025 \
-  --gxp-csv modules/edendale_gxp/outputs_latest/gxp_hourly_2025.csv \
+  --gxp-csv Output/runs/poc_20260105_release02/epoch2025/regional_signals/dispatch_prop_v2_capfix1/signals/headroom_MW_2025.csv \
   --incremental-csv Output/runs/<run_id>/signals/incremental_electricity_MW_2025.csv \
   --upgrades-config Input/signals/grid_upgrades.toml \
   --voll 10000.0
 
-# Or use default path (Input/signals/grid_upgrades.toml)
+# Or use default upgrades path (Input/signals/grid_upgrades.toml)
 python -m src.regional_electricity_poc --epoch 2025 \
-  --gxp-csv modules/edendale_gxp/outputs_latest/gxp_hourly_2025.csv \
+  --gxp-csv Output/runs/poc_20260105_release02/epoch2025/regional_signals/dispatch_prop_v2_capfix1/signals/headroom_MW_2025.csv \
   --incremental-csv Output/runs/<run_id>/signals/incremental_electricity_MW_2025.csv
 ```
 
@@ -493,13 +548,13 @@ Use `scripts/run_poc_layers.ps1` to run the complete pipeline:
 
 ```powershell
 # Run all layers for all epochs
-.\scripts\run_poc_layers.ps1 -Bundle poc_20260105_115401 -RunId dispatch_prop_v2_capfix1 -Layers all
+.\scripts\run_poc_layers.ps1 -Bundle poc_20260105_release02 -RunId dispatch_prop_v2_capfix1 -Layers all
 
 # Run specific layers
-.\scripts\run_poc_layers.ps1 -Bundle poc_20260105_115401 -RunId dispatch_prop_v2_capfix1 -Layers "demandpack,dispatch,compare,rdm"
+.\scripts\run_poc_layers.ps1 -Bundle poc_20260105_release02 -RunId dispatch_prop_v2_capfix1 -Layers "demandpack,dispatch,compare,rdm"
 
 # Run for specific epochs
-.\scripts\run_poc_layers.ps1 -Bundle poc_20260105_115401 -Epochs "2020,2025,2035_EB,2035_BB" -Layers dispatch
+.\scripts\run_poc_layers.ps1 -Bundle poc_20260105_release02 -Epochs "2020,2025,2035_EB,2035_BB" -Layers dispatch
 ```
 
 **Available Layers:**
@@ -545,6 +600,7 @@ Output/runs/<bundle>/
 **1. Clean bundle (if needed):**
 ```powershell
 # Remove existing outputs (optional, for clean run)
+# WARNING: Do not delete or overwrite poc_20260105_release02 (paper archive).
 Remove-Item -Recurse -Force "Output\runs\<bundle>"
 ```
 
@@ -575,8 +631,8 @@ git push
 ### Example: Full Run
 
 ```powershell
-# Set variables
-$bundle = "poc_20260105_115401"
+# Set variables — use a NEW bundle name; do not overwrite poc_20260105_release02
+$bundle = "poc_rerun_YYYYMMDD"
 $runId = "dispatch_prop_v2_capfix1"
 
 # Run all layers
@@ -598,7 +654,6 @@ git push
 - **[Thesis Artefacts](docs/THESIS_ARTEFACTS.md)**: Complete list of output files with schemas
 - **[Thesis Figures](docs/THESIS_FIGURES.md)**: Figure listing with generation commands and suggested captions
 
-## Reproducibility
+## Reproducibility (version control)
 
 All development is tracked with git commits and tags. See `docs/git_workflow.md` for version control practices and workflow guidance.
-

@@ -301,7 +301,7 @@ def main():
     parser.add_argument('--output-root', type=str, default='Output',
                        help='Output root directory (default: Output)')
     parser.add_argument('--bundle', type=str, required=True,
-                       help='Bundle name (e.g., poc_20260105_115401)')
+                       help='Bundle name (e.g., poc_20260105_release02)')
     parser.add_argument('--eb-run', type=str, default='epoch2035_EB/dispatch_prop_v2_capfix1',
                        help='Relative path to EB run (default: epoch2035_EB/dispatch_prop_v2_capfix1)')
     parser.add_argument('--bb-run', type=str, default='epoch2035_BB/dispatch_prop_v2_capfix1',

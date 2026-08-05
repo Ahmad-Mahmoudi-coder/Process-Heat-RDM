@@ -451,11 +451,11 @@ def run_single_epoch(epoch: int, batch_run_id: str, args, INPUT_DIR: Path, ROOT:
                 print(f"[ERROR] {e}")
                 return derived_run_id, success_dict
     
-    # Resolve GXP CSV
+    # Resolve optional external GXP CSV (not used by frozen PoC; headroom is within-model)
     if args.gxp_csv:
         gxp_csv_path = resolve_path(args.gxp_csv)
     else:
-        gxp_csv_path = MODULES_DIR / 'edendale_gxp' / 'outputs_latest' / f'gxp_hourly_{epoch}.csv'
+        gxp_csv_path = None
     
     print(f"[OK] Input directory validated: {INPUT_DIR}")
     print(f"[OK] DemandPack config: {demandpack_config_path}")
@@ -566,7 +566,9 @@ def run_single_epoch(epoch: int, batch_run_id: str, args, INPUT_DIR: Path, ROOT:
     
     success_dict['plot'] = plot_success
     
-    # Step 3B: Load GXP hourly and create electricity_signals CSV
+    # Step 3B: Optionally load external GXP hourly and create electricity_signals CSV.
+    # Frozen PoC uses within-model stylised headroom; skip unless --gxp-csv is provided
+    # or an optional local SignalsPack is present.
     signals_dir = run_dir / 'signals'
     signals_dir.mkdir(parents=True, exist_ok=True)
     
@@ -576,8 +578,8 @@ def run_single_epoch(epoch: int, batch_run_id: str, args, INPUT_DIR: Path, ROOT:
     try:
         from src.load_gxp_signals import load_gxp_hourly, load_grid_emissions_intensity, align_signals_to_demand
         
-        # Load GXP hourly data
-        print(f"Step 2: Loading GXP hourly data for epoch {epoch}...")
+        # Load GXP hourly data (optional external SignalsPack)
+        print(f"Step 2: Loading optional external GXP hourly data for epoch {epoch}...")
         gxp_hourly = load_gxp_hourly(epoch, MODULES_DIR)
         
         # Load demand to align signals
@@ -721,7 +723,7 @@ def run_single_epoch(epoch: int, batch_run_id: str, args, INPUT_DIR: Path, ROOT:
     incremental_path = signals_dir / f'incremental_electricity_MW_{epoch_variant_label}.csv'
     regional_success = None
     
-    if gxp_csv_path.exists() and incremental_path.exists():
+    if gxp_csv_path and gxp_csv_path.exists() and incremental_path.exists():
         regional_output = str(run_dir / f'regional_electricity_signals_{epoch}.csv')
         cmd = [sys.executable, '-m', 'src.regional_electricity_poc',
                '--epoch', str(epoch),
@@ -745,8 +747,12 @@ def run_single_epoch(epoch: int, batch_run_id: str, args, INPUT_DIR: Path, ROOT:
             print(f"[WARN] Regional electricity PoC failed for epoch {epoch} (run_id={run_id})")
             print("  Continuing...")
     else:
-        if not gxp_csv_path.exists():
-            print(f"[SKIP] Regional electricity PoC: GXP CSV not found: {gxp_csv_path}")
+        if not (gxp_csv_path and gxp_csv_path.exists()):
+            print(
+                f"[SKIP] Regional electricity PoC: no external GXP CSV "
+                f"({gxp_csv_path if gxp_csv_path else 'None'}). "
+                f"Frozen PoC uses within-model stylised headroom instead."
+            )
         if not incremental_path.exists():
             print(f"[SKIP] Regional electricity PoC: Incremental electricity CSV not found: {incremental_path}")
         # regional_success remains None (skipped)
@@ -785,7 +791,7 @@ def main():
     parser.add_argument('--utilities-csv', type=str, default=None,
                        help='Path to site utilities CSV (default: auto-discover from <input>/site/utilities/)')
     parser.add_argument('--gxp-csv', type=str, default=None,
-                       help='Path to GXP hourly CSV (default: modules/edendale_gxp/outputs_latest/gxp_hourly_<epoch>.csv)')
+                       help='Optional external GXP hourly CSV. Frozen PoC uses within-model stylised headroom instead.')
     args = parser.parse_args()
     
     # Parse epochs

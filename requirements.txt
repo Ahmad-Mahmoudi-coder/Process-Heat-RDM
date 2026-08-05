@@ -1,0 +1,12 @@
+# Process-Heat-RDM — minimal dependencies for reproducing the frozen PoC bundle
+# Python 3.11+ recommended (tested with Python 3.11.9)
+#
+# Install:
+#   python -m venv .venv
+#   .\.venv\Scripts\Activate.ps1   # Windows
+#   pip install -r requirements.txt
+
+numpy>=1.26,<2
+pandas>=2.0,<3
+matplotlib>=3.7,<4
+scipy>=1.11,<2

@@ -34,8 +34,8 @@ security_level = "N"
 
 # PoC-only extension beyond RETA screened menu.
 # Sized to exceed observed required upgrade max (~116.7 MW) for 2035_EB incremental demand.
-# Capex is a screening extrapolation from RETA Option 3 (.9m / 97 MW ≈ .576m per MW).
-# Not an official estimate.
+# Capex uses a screening rate of 0.50m per MW (75,000,000 NZD / 150 MW).
+# Not an official estimate / PoC-only extension beyond RETA.
 [[upgrades]]
 name = "fonterra_opt4_N_plus150MW"
 capacity_MW = 150

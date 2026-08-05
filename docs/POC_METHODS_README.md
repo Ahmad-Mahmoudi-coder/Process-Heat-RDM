@@ -82,7 +82,7 @@ Scripts use `canonical_output_path()` to resolve paths consistently, supporting 
 
 ```powershell
 # Set variables
-$bundle = "poc_20260105_115401"
+$bundle = "poc_20260105_release02"
 $runId = "dispatch_prop_v2_capfix1"
 
 # Run all layers

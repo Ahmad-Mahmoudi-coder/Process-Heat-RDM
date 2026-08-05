@@ -1,8 +1,13 @@
 """
-Loader for Edendale_GXP module outputs.
+Optional loader for an external GXP SignalsPack (hourly tariff / headroom / emissions).
 
-Provides functions to load GXP hourly data (tariff, headroom) and grid emissions intensity
-for use in site dispatch coupling.
+Provenance note: the authoritative frozen PoC bundle (poc_20260105_release02) does NOT
+consume an external Edendale_GXP SignalsPack. Headroom used for paper results is the
+within-model stylised series from src.generate_regional_signals_poc /
+src.gxp_rdm_screen.load_or_generate_headroom.
+
+This module remains only for optional local coupling experiments when an external
+SignalsPack CSV directory is supplied separately (not part of the archived submodule).
 """
 
 # Bootstrap: allow `python .\src\script.py` (adds repo root to sys.path)
@@ -21,38 +26,43 @@ from src.path_utils import repo_root
 
 def load_gxp_hourly(epoch: int, modules_dir: Optional[Path] = None) -> pd.DataFrame:
     """
-    Load GXP hourly data for an epoch.
-    
-    Reads from: modules/edendale_gxp/outputs_latest/gxp_hourly_<epoch>.csv
-    
+    Load optional external GXP hourly data for an epoch.
+
+    Looks for: <modules_dir>/gxp_signals/outputs_latest/gxp_hourly_<epoch>.csv
+    (legacy path modules/edendale_gxp/... is no longer shipped with this repo).
+
+    For the paper PoC, prefer within-model headroom generation instead of this loader.
+
     Expected columns:
     - timestamp_utc
     - headroom_mw (optional)
     - tariff_nzd_per_mwh (required)
-    
+
     Args:
         epoch: Epoch year (e.g., 2020, 2025, 2028, 2035)
         modules_dir: Optional modules directory (default: repo_root/modules)
-        
+
     Returns:
         DataFrame with columns:
         - timestamp_utc (datetime64[ns, UTC])
         - elec_price_nzd_per_MWh (from tariff_nzd_per_mwh)
         - headroom_MW (from headroom_mw, if present)
-        
+
     Raises:
         FileNotFoundError: If gxp_hourly file not found
         ValueError: If required columns missing or timestamp alignment fails
     """
     if modules_dir is None:
         modules_dir = repo_root() / 'modules'
-    
-    gxp_file = modules_dir / 'edendale_gxp' / 'outputs_latest' / f'gxp_hourly_{epoch}.csv'
-    
+
+    gxp_file = modules_dir / 'gxp_signals' / 'outputs_latest' / f'gxp_hourly_{epoch}.csv'
+
     if not gxp_file.exists():
         raise FileNotFoundError(
             f"GXP hourly file not found: {gxp_file}\n"
-            f"Expected location: modules/edendale_gxp/outputs_latest/gxp_hourly_{epoch}.csv"
+            f"Expected location: modules/gxp_signals/outputs_latest/gxp_hourly_{epoch}.csv\n"
+            f"Note: frozen PoC results use within-model stylised headroom "
+            f"(src.gxp_rdm_screen.load_or_generate_headroom); an external SignalsPack is optional."
         )
     
     df = pd.read_csv(gxp_file)
@@ -109,38 +119,40 @@ def load_gxp_hourly(epoch: int, modules_dir: Optional[Path] = None) -> pd.DataFr
 
 def load_grid_emissions_intensity(epoch: int, modules_dir: Optional[Path] = None) -> pd.DataFrame:
     """
-    Load grid emissions intensity data for an epoch.
-    
-    Reads from: modules/edendale_gxp/outputs_latest/grid_emissions_intensity_<epoch>.csv
-    
+    Load optional external grid emissions intensity data for an epoch.
+
+    Looks for: <modules_dir>/gxp_signals/outputs_latest/grid_emissions_intensity_<epoch>.csv
+    (legacy path modules/edendale_gxp/... is no longer shipped with this repo).
+
     Expected columns:
     - timestamp_utc
     - grid_co2e_kg_per_mwh_avg
     - grid_co2e_kg_per_mwh_marginal
-    
+
     Args:
         epoch: Epoch year (e.g., 2020, 2025, 2028, 2035)
         modules_dir: Optional modules directory (default: repo_root/modules)
-        
+
     Returns:
         DataFrame with columns:
         - timestamp_utc (datetime64[ns, UTC])
         - grid_co2e_kg_per_mwh_avg
         - grid_co2e_kg_per_mwh_marginal
-        
+
     Raises:
         FileNotFoundError: If grid emissions file not found
         ValueError: If required columns missing
     """
     if modules_dir is None:
         modules_dir = repo_root() / 'modules'
-    
-    emissions_file = modules_dir / 'edendale_gxp' / 'outputs_latest' / f'grid_emissions_intensity_{epoch}.csv'
-    
+
+    emissions_file = modules_dir / 'gxp_signals' / 'outputs_latest' / f'grid_emissions_intensity_{epoch}.csv'
+
     if not emissions_file.exists():
         raise FileNotFoundError(
             f"Grid emissions intensity file not found: {emissions_file}\n"
-            f"Expected location: modules/edendale_gxp/outputs_latest/grid_emissions_intensity_{epoch}.csv"
+            f"Expected location: modules/gxp_signals/outputs_latest/grid_emissions_intensity_{epoch}.csv\n"
+            f"Note: frozen PoC results do not require this external SignalsPack."
         )
     
     df = pd.read_csv(emissions_file)

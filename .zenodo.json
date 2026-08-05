@@ -1,0 +1,29 @@
+{
+  "title": "Process-Heat-RDM: Proof of Concept for Decision-Centred Modelling (DCM)",
+  "upload_type": "software",
+  "description": "Authoritative proof-of-concept for Decision-Centred Modelling (DCM). Demonstrates a site-to-region industrial process-heat decision (electric-boiler vs biomass-boiler pathways) at Fonterra Edendale, Southland, New Zealand, evaluated across 100 paired futures under deep uncertainty. Numerical results are illustrative of the method under declared low-to-medium-maturity scope conditions and are not calibrated operational guidance.",
+  "creators": [
+    {
+      "name": "Mahmoudi Lahijani, Seyed Ahmad",
+      "affiliation": "Auckland University of Technology",
+      "orcid": "PLACEHOLDER"
+    }
+  ],
+  "license": "mit",
+  "keywords": [
+    "decision-centred modelling",
+    "robust decision making",
+    "process heat",
+    "deep uncertainty",
+    "infrastructure planning",
+    "industrial electrification"
+  ],
+  "related_identifiers": [
+    {
+      "relation": "isSupplementTo",
+      "identifier": "PLACEHOLDER-paper-DOI",
+      "scheme": "doi",
+      "resource_type": "publication-article"
+    }
+  ]
+}

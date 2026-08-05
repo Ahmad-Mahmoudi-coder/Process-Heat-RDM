@@ -137,7 +137,7 @@ def canonical_output_path(bundle: str, epoch_tag: str = None, layer: str = None,
     Structure: Output/runs/<bundle>/epoch<epoch_tag>/<layer>/<runid>/<filename>
     
     Args:
-        bundle: Bundle name (e.g., "poc_20260105_115401")
+        bundle: Bundle name (e.g., "poc_20260105_release02")
         epoch_tag: Epoch tag (e.g., "2020", "2035_EB") - optional for bundle-level paths
         layer: Layer name ("demandpack", "dispatch", "regional_electricity") - optional
         runid: Run ID (e.g., "dispatch_prop_v2_capfix1") - optional
@@ -148,11 +148,11 @@ def canonical_output_path(bundle: str, epoch_tag: str = None, layer: str = None,
         Path object for the canonical location
         
     Examples:
-        >>> canonical_output_path("poc_20260105_115401", "2035_EB", "dispatch", "dispatch_prop_v2_capfix1", "site_dispatch_2035_EB_summary.csv")
-        Path("Output/runs/poc_20260105_115401/epoch2035_EB/dispatch/dispatch_prop_v2_capfix1/site_dispatch_2035_EB_summary.csv")
+        >>> canonical_output_path("poc_20260105_release02", "2035_EB", "dispatch", "dispatch_prop_v2_capfix1", "site_dispatch_2035_EB_summary.csv")
+        Path("Output/runs/poc_20260105_release02/epoch2035_EB/dispatch/dispatch_prop_v2_capfix1/site_dispatch_2035_EB_summary.csv")
         
-        >>> canonical_output_path("poc_20260105_115401", filename="kpi_table_capfix1.csv")
-        Path("Output/runs/poc_20260105_115401/kpi_table_capfix1.csv")
+        >>> canonical_output_path("poc_20260105_release02", filename="kpi_table_capfix1.csv")
+        Path("Output/runs/poc_20260105_release02/kpi_table_capfix1.csv")
     """
     root = repo_root()
     base_path = root / output_root / "runs" / bundle

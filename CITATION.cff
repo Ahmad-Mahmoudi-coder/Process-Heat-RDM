@@ -1,4 +1,4 @@
-﻿cff-version: 1.2.0
+cff-version: 1.2.0
 message: "If you use this software, please cite it using the metadata below."
 title: "Process-Heat-RDM: Proof of Concept for Decision-Centred Modelling (DCM)"
 authors:
@@ -11,14 +11,7 @@ date-released: "2026-08-05"
 license: MIT
 repository-code: "https://github.com/Ahmad-Mahmoudi-coder/Process-Heat-RDM"
 type: software
-abstract: >-
-  Authoritative proof-of-concept for Decision-Centred Modelling (DCM),
-  demonstrating a site-to-region industrial process-heat decision
-  (electric-boiler vs biomass-boiler pathways) at Fonterra Edendale,
-  Southland, New Zealand, evaluated across 100 paired futures under deep
-  uncertainty. Numerical results are illustrative of the method under
-  declared low-to-medium-maturity scope conditions and are not calibrated
-  operational guidance.
+abstract: "Authoritative proof-of-concept for Decision-Centred Modelling (DCM), demonstrating a site-to-region industrial process-heat decision (electric-boiler vs biomass-boiler pathways) at Fonterra Edendale, Southland, New Zealand, evaluated across 100 paired futures under deep uncertainty. Numerical results are illustrative of the method under declared low-to-medium-maturity scope conditions and are not calibrated operational guidance."
 preferred-citation:
   type: article
   title: "Decision-Centred Modelling (DCM): A Governed Modular Architecture for Infrastructure Planning Under Deep Uncertainty"

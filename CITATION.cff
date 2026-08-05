@@ -1,13 +1,13 @@
-cff-version: 1.2.0
+﻿cff-version: 1.2.0
 message: "If you use this software, please cite it using the metadata below."
 title: "Process-Heat-RDM: Proof of Concept for Decision-Centred Modelling (DCM)"
 authors:
   - family-names: "Mahmoudi Lahijani"
     given-names: "Seyed Ahmad"
     affiliation: "Auckland University of Technology"
-    orcid: "https://orcid.org/PLACEHOLDER"
+    orcid: "https://orcid.org/0000-0002-5086-5745"
 version: "1.0.0"
-date-released: "PLACEHOLDER"
+date-released: "2026-08-05"
 license: MIT
 repository-code: "https://github.com/Ahmad-Mahmoudi-coder/Process-Heat-RDM"
 type: software
@@ -26,6 +26,5 @@ preferred-citation:
     - family-names: "Mahmoudi Lahijani"
       given-names: "Seyed Ahmad"
       affiliation: "Auckland University of Technology"
-      orcid: "https://orcid.org/PLACEHOLDER"
+      orcid: "https://orcid.org/0000-0002-5086-5745"
   year: 2026
-  doi: "PLACEHOLDER"
